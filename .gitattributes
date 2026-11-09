@@ -1,0 +1,19 @@
+# Line-ending policy.
+#
+# The build and several contract tests compare exact byte counts and literal
+# source fragments, and `git apply` matches patch context bytes literally. With
+# core.autocrlf=true (the Windows default) a fresh checkout rewrites every text
+# artifact to CRLF, which silently breaks all of that:
+#
+#   offline_translation/llama.cpp-LICENSE.txt   1078 -> 1099 bytes (21 lines)
+#   vendor patch files                          268,931 -> 274,366 bytes
+#
+# Pin the working tree to LF on every platform and normalise on commit, so a
+# checkout is byte-identical to the stored blob regardless of the machine's
+# autocrlf setting. Binary files are auto-detected and left untouched.
+* text=auto eol=lf
+
+# Patch files must never be converted at all: `-text` opts them out of both the
+# checkout conversion and commit normalisation.
+*.patch -text
+third_party/patches/*.patch whitespace=-blank-at-eol

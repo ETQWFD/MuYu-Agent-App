@@ -1,0 +1,598 @@
+package com.muyuchat.mca
+
+import com.muyuchat.core.engine.ChatMessage
+import com.muyuchat.core.engine.Role
+import org.json.JSONObject
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
+import org.junit.Test
+import java.io.File
+import java.nio.file.Files
+
+class WorldBookStoreTest {
+    @Test
+    fun recoversACompletedPendingSnapshotWhenThePrimaryFileIsMissing() {
+        val root = Files.createTempDirectory("world-book-store-recovery").toFile()
+        try {
+            val target = File(root, "world_books.json")
+            val store = WorldBookStore(target, testing = true)
+            val expected = WorldBookRecord(
+                id = "recovered",
+                name = "Recovered",
+                entries = listOf(WorldBookEntry(id = "entry", content = "persistent context", constant = true))
+            )
+            store.save(listOf(expected))
+            val stagedPayload = target.readText(Charsets.UTF_8)
+            assertTrue(target.delete())
+            store.pendingFileForTesting().writeText(stagedPayload, Charsets.UTF_8)
+
+            assertEquals(listOf(expected), store.load())
+            assertTrue(target.isFile)
+            assertFalse(store.pendingFileForTesting().exists())
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun stalePendingSnapshotNeverOverridesAReadableCommittedFile() {
+        val root = Files.createTempDirectory("world-book-store-stale-pending").toFile()
+        try {
+            val target = File(root, "world_books.json")
+            val store = WorldBookStore(target, testing = true)
+            val old = WorldBookRecord(
+                id = "old",
+                name = "Old",
+                entries = listOf(WorldBookEntry(id = "old-entry", content = "old", constant = true))
+            )
+            val current = WorldBookRecord(
+                id = "current",
+                name = "Current",
+                entries = listOf(WorldBookEntry(id = "current-entry", content = "current", constant = true))
+            )
+            store.save(listOf(old))
+            val stalePayload = target.readText(Charsets.UTF_8)
+            store.save(listOf(current))
+            store.pendingFileForTesting().writeText(stalePayload, Charsets.UTF_8)
+
+            assertEquals(listOf(current), store.load())
+            assertFalse(store.pendingFileForTesting().exists())
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun parsesObjectEntriesFromNestedCharacterBook() {
+        val root = JSONObject(
+            """
+            {
+              "character_book": {
+                "title": "江湖设定",
+                "entries": {
+                  "fallback-id": {
+                    "key": "龙门, 客栈",
+                    "content": "龙门客栈位于大漠边缘。",
+                    "order": 21
+                  },
+                  "constant-entry": {
+                    "uid": 73,
+                    "entry": "所有回答都使用简体中文。",
+                    "constant": true,
+                    "priority": 9
+                  },
+                  "ignored": {
+                    "key": "unused",
+                    "content": "   "
+                  }
+                }
+              }
+            }
+            """.trimIndent()
+        )
+
+        val book = WorldBookCodec.parse(
+            root = root,
+            scope = WorldBookScope.ASSISTANT,
+            assistantId = "assistant-1"
+        )
+
+        assertEquals("江湖设定", book.name)
+        assertEquals(WorldBookScope.ASSISTANT, book.scope)
+        assertEquals("assistant-1", book.assistantId)
+        assertEquals(2, book.entries.size)
+
+        val keyed = requireNotNull(book.entries.firstOrNull { it.id == "fallback-id" })
+        assertEquals(listOf("龙门", "客栈"), keyed.keys)
+        assertEquals("龙门客栈位于大漠边缘。", keyed.content)
+        assertEquals(21, keyed.priority)
+        assertFalse(keyed.constant)
+
+        val constant = requireNotNull(book.entries.firstOrNull { it.id == "73" })
+        assertTrue(constant.constant)
+        assertTrue(constant.keys.isEmpty())
+        assertEquals(9, constant.priority)
+    }
+
+    @Test
+    fun parsesArrayEntriesAndKeyAliasesFromRawJson() {
+        val result = WorldBookCodec.parse(
+            rawJson = """
+                {
+                  "name": "城市资料",
+                  "entries": [
+                    {
+                      "uid": "shanghai",
+                      "keys": "上海, 魔都\n沪上",
+                      "content": "上海简称沪。",
+                      "priority": 12
+                    },
+                    {
+                      "uid": "disabled",
+                      "key": ["杭州", "西湖"],
+                      "content": "杭州以西湖闻名。",
+                      "enabled": false,
+                      "order": 7
+                    },
+                    {
+                      "uid": "constant",
+                      "content": "保持回答简洁。",
+                      "constant": true
+                    },
+                    {
+                      "uid": "sillytavern-selective",
+                      "key": ["退款"],
+                      "keysecondary": ["订单"],
+                      "selective": true,
+                      "content": "订单退款规则。"
+                    }
+                  ]
+                }
+            """.trimIndent(),
+            scope = WorldBookScope.CHAT,
+            chatSessionId = "chat-7"
+        )
+
+        assertTrue(result.isSuccess)
+        val book = requireNotNull(result.book)
+        assertEquals("城市资料", book.name)
+        assertEquals(WorldBookScope.CHAT, book.scope)
+        assertEquals("chat-7", book.chatSessionId)
+        assertEquals(4, book.entries.size)
+
+        val shanghai = requireNotNull(book.entries.firstOrNull { it.id == "shanghai" })
+        assertEquals(listOf("上海", "魔都", "沪上"), shanghai.keys)
+        assertEquals(12, shanghai.priority)
+
+        val disabled = requireNotNull(book.entries.firstOrNull { it.id == "disabled" })
+        assertFalse(disabled.enabled)
+        assertTrue(disabled.keys.containsAll(listOf("杭州", "西湖")))
+        assertEquals(7, disabled.priority)
+
+        assertTrue(requireNotNull(book.entries.firstOrNull { it.id == "constant" }).constant)
+        val selective = requireNotNull(book.entries.firstOrNull { it.id == "sillytavern-selective" })
+        assertEquals(listOf("订单"), selective.secondaryKeys)
+        assertTrue(selective.selective)
+    }
+
+    @Test
+    fun keepsKeylessTavernEntriesForEditingWithoutActivatingThem() {
+        val result = WorldBookCodec.parse(
+            rawJson = """{"entries":[{"id":1,"content":"没有关键词的地图","constant":false,"enabled":true},{"id":2,"content":"常驻人物设定","constant":true,"enabled":true}]}""",
+            scope = WorldBookScope.GLOBAL
+        )
+
+        val book = requireNotNull(result.book)
+        assertEquals(2, book.entries.size)
+        assertTrue(book.entries[0].enabled)
+        assertTrue(book.entries[1].enabled)
+        assertEquals(listOf("2"), WorldBookResolver.select(
+            books = listOf(book),
+            messages = emptyList(),
+            assistantId = "assistant",
+            chatSessionId = null,
+            tokenBudget = 128
+        ).selectedEntryIds)
+    }
+
+    @Test
+    fun importsTavernWorldInfoWrapperAndMapsDisabledAndInsertionOrderAliases() {
+        val result = WorldBookCodec.parse(
+            rawJson = """
+                {
+                  "name":"酒馆世界信息",
+                  "world_info":{
+                    "entries":{
+                      "0":{"id":7,"key":["龙门"],"content":"龙门设定。","insertion_order":19},
+                      "1":{"uid":8,"key":"客栈","content":"已禁用的内容","disable":true}
+                    }
+                  }
+                }
+            """.trimIndent(),
+            scope = WorldBookScope.GLOBAL
+        )
+
+        assertTrue(result.isSuccess)
+        val book = requireNotNull(result.book)
+        assertEquals("酒馆世界信息", book.name)
+        assertEquals("7", book.entries.first().id)
+        assertEquals(19, book.entries.first().priority)
+        assertFalse(book.entries.last().enabled)
+
+        val selected = WorldBookResolver.select(
+            books = listOf(book),
+            messages = listOf(ChatMessage(Role.USER, "龙门和客栈在哪里？")),
+            assistantId = "assistant",
+            chatSessionId = null,
+            tokenBudget = 128
+        )
+        assertEquals(listOf("7"), selected.selectedEntryIds)
+        assertTrue(selected.context.contains("龙门设定。"))
+        assertFalse(selected.context.contains("已禁用的内容"))
+    }
+
+    @Test
+    fun importsEntryArraysAndNewlineDelimitedJsonExports() {
+        val array = WorldBookCodec.parse(
+            rawJson = """
+                [
+                  {"uid":"array-entry","keys":["杭州"],"content":"杭州条目。"},
+                  {"uid":"array-constant","constant":true,"content":"始终注入。"}
+                ]
+            """.trimIndent(),
+            scope = WorldBookScope.GLOBAL
+        )
+        assertTrue(array.isSuccess)
+        assertEquals(2, requireNotNull(array.book).entries.size)
+
+        val jsonl = WorldBookCodec.parse(
+            rawJson = """
+                {"name":"逐行导出"}
+                {"uid":"city","key":["苏州","姑苏"],"content":"苏州有园林。","order":5}
+                {"uid":"always","constant":true,"content":"回答使用简体中文。"}
+            """.trimIndent(),
+            scope = WorldBookScope.CHAT,
+            chatSessionId = "chat-1"
+        )
+        assertTrue("JSONL should import: ${jsonl.error}", jsonl.isSuccess)
+        assertEquals("逐行导出", requireNotNull(jsonl.book).name)
+        assertEquals(listOf("city", "always"), jsonl.book?.entries?.map { it.id })
+
+        val selected = WorldBookResolver.select(
+            books = listOf(requireNotNull(jsonl.book)),
+            messages = listOf(ChatMessage(Role.USER, "我想了解姑苏。")),
+            assistantId = "assistant",
+            chatSessionId = "chat-1",
+            tokenBudget = 128
+        )
+        assertEquals(listOf("always", "city"), selected.selectedEntryIds)
+        assertTrue(selected.context.contains("苏州有园林。"))
+    }
+
+    @Test
+    fun matchesChineseAndUnicodeNormalizedKeywords() {
+        val book = worldBook(
+            name = "Unicode",
+            entries = listOf(
+                entry("chinese", listOf("杭州西湖"), "西湖有苏堤与白堤。", priority = 3),
+                entry("full-width", listOf("ＡＩ助手"), "AI 助手应先确认目标。", priority = 2),
+                entry("combining", listOf("Cafe\u0301"), "Café 使用组合字符匹配。", priority = 1)
+            )
+        )
+
+        val selection = WorldBookResolver.select(
+            books = listOf(book),
+            messages = listOf(
+                ChatMessage(Role.USER, "请让ai助手介绍杭州西湖，并补充 CAFÉ 的写法。")
+            ),
+            assistantId = "assistant",
+            chatSessionId = "chat",
+            tokenBudget = 128
+        )
+
+        assertEquals(listOf("chinese", "full-width", "combining"), selection.selectedEntryIds)
+        assertTrue(selection.context.contains("西湖有苏堤与白堤。"))
+        assertTrue(selection.context.contains("AI 助手应先确认目标。"))
+        assertTrue(selection.context.contains("Café 使用组合字符匹配。"))
+    }
+
+    @Test
+    fun keepsSelectiveKeywordAndRegexTriggers() {
+        val book = worldBook(
+            name = "advanced",
+            entries = listOf(
+                WorldBookEntry(
+                    id = "selective",
+                    keys = listOf("退款"),
+                    secondaryKeys = listOf("订单"),
+                    content = "订单退款规则。",
+                    selective = true
+                ),
+                WorldBookEntry(
+                    id = "regex",
+                    keys = listOf("ignored"),
+                    content = "版本号规则。",
+                    useRegex = true
+                ).copy(keys = listOf("v\\d+"))
+            )
+        )
+
+        val selection = WorldBookResolver.select(
+            books = listOf(book),
+            messages = listOf(ChatMessage(Role.USER, "请处理订单退款，当前是 v2。")),
+            assistantId = "assistant",
+            chatSessionId = null,
+            tokenBudget = 128
+        )
+
+        assertEquals(setOf("selective", "regex"), selection.selectedEntryIds.toSet())
+    }
+
+    @Test
+    fun tavernImportKeepsRegexEntriesAndReportsUnsupportedPatterns() {
+        val result = WorldBookCodec.parse(
+            rawJson = """
+                {
+                  "name":"safe import",
+                  "entries":{
+                    "regex":{"key":"^(a+)+$","content":"pattern entry","use_regex":true},
+                    "keyword":{"key":"dragon","content":"ordinary entry"}
+                  }
+                }
+            """.trimIndent(),
+            scope = WorldBookScope.GLOBAL
+        )
+
+        assertTrue(result.isSuccess)
+        assertEquals(setOf("regex", "keyword"), requireNotNull(result.book).entries.map { it.id }.toSet())
+        assertTrue(result.warnings.isEmpty())
+        val selection = WorldBookResolver.select(
+            books = listOf(requireNotNull(result.book)),
+            messages = listOf(ChatMessage(Role.USER, "dragon and " + "a".repeat(20_000) + "!")),
+            assistantId = "assistant",
+            chatSessionId = null,
+            tokenBudget = 128
+        )
+        assertEquals(listOf("keyword"), selection.selectedEntryIds)
+    }
+
+    @Test
+    fun regexOnlyCharacterBookKeepsTavernLiteralFlagsAndDoesNotRequireDistinctPrompt() {
+        val result = WorldBookCodec.parse(
+            rawJson = """
+                {"name":"角色世界书","entries":[
+                  {"uid":"regex","key":["/hello, world/i"],"content":"触发词内容","use_regex":true},
+                  {"uid":"unsupported","key":["(hello)\\1"],"content":"保留原文","use_regex":true}
+                ]}
+            """.trimIndent(),
+            scope = WorldBookScope.ASSISTANT,
+            assistantId = "assistant"
+        )
+        assertTrue(result.isSuccess)
+        assertEquals(2, requireNotNull(result.book).entries.size)
+        assertTrue(result.warnings.single().contains("1 条正则触发条目"))
+        val selection = WorldBookResolver.select(
+            books = listOf(requireNotNull(result.book)),
+            messages = listOf(ChatMessage(Role.USER, "HELLO, WORLD")),
+            assistantId = "assistant",
+            chatSessionId = null,
+            tokenBudget = 128
+        )
+        assertEquals(listOf("regex"), selection.selectedEntryIds)
+    }
+
+    @Test
+    fun filtersByScopeAndSortsConstantsBeforePriority() {
+        val trigger = listOf(ChatMessage(Role.USER, "trigger all matching entries"))
+        val books = listOf(
+            worldBook(
+                name = "global",
+                entries = listOf(
+                    entry("global-high", listOf("trigger"), "global high", priority = 100),
+                    entry("global-constant", emptyList(), "global constant", constant = true, priority = -100)
+                )
+            ),
+            worldBook(
+                name = "assistant-match",
+                scope = WorldBookScope.ASSISTANT,
+                assistantId = "assistant-1",
+                entries = listOf(entry("assistant-match", listOf("trigger"), "assistant match", priority = 50))
+            ),
+            worldBook(
+                name = "assistant-other",
+                scope = WorldBookScope.ASSISTANT,
+                assistantId = "assistant-2",
+                entries = listOf(entry("assistant-other", listOf("trigger"), "must not appear", priority = 1000))
+            ),
+            worldBook(
+                name = "chat-match",
+                scope = WorldBookScope.CHAT,
+                chatSessionId = "chat-1",
+                entries = listOf(entry("chat-match", listOf("trigger"), "chat match", priority = 40))
+            ),
+            worldBook(
+                name = "chat-other",
+                scope = WorldBookScope.CHAT,
+                chatSessionId = "chat-2",
+                entries = listOf(entry("chat-other", listOf("trigger"), "must not appear", priority = 900))
+            ),
+            worldBook(
+                name = "disabled",
+                enabled = false,
+                entries = listOf(entry("disabled", listOf("trigger"), "must not appear", priority = 800))
+            )
+        )
+
+        val selection = WorldBookResolver.select(
+            books = books,
+            messages = trigger,
+            assistantId = "assistant-1",
+            chatSessionId = "chat-1",
+            tokenBudget = 128
+        )
+
+        assertEquals(
+            listOf("global-constant", "global-high", "assistant-match", "chat-match"),
+            selection.selectedEntryIds
+        )
+        assertFalse(selection.context.contains("must not appear"))
+        assertTrue(selection.context.indexOf("global constant") < selection.context.indexOf("global high"))
+        assertTrue(selection.context.indexOf("global high") < selection.context.indexOf("assistant match"))
+        assertTrue(selection.context.indexOf("assistant match") < selection.context.indexOf("chat match"))
+    }
+
+    @Test
+    fun scopedOwnerCleanupPreservesGlobalAndUnrelatedBooks() {
+        val books = listOf(
+            worldBook(name = "global", entries = listOf(entry("global", emptyList(), "global", constant = true))),
+            worldBook(
+                name = "assistant-a",
+                scope = WorldBookScope.ASSISTANT,
+                assistantId = "assistant-a",
+                entries = listOf(entry("assistant-a", emptyList(), "a", constant = true))
+            ),
+            worldBook(
+                name = "assistant-b",
+                scope = WorldBookScope.ASSISTANT,
+                assistantId = "assistant-b",
+                entries = listOf(entry("assistant-b", emptyList(), "b", constant = true))
+            ),
+            worldBook(
+                name = "chat-a",
+                scope = WorldBookScope.CHAT,
+                chatSessionId = "chat-a",
+                entries = listOf(entry("chat-a", emptyList(), "chat a", constant = true))
+            ),
+            worldBook(
+                name = "chat-b",
+                scope = WorldBookScope.CHAT,
+                chatSessionId = "chat-b",
+                entries = listOf(entry("chat-b", emptyList(), "chat b", constant = true))
+            )
+        )
+
+        val afterAssistantDelete = books.withoutScopedOwner(WorldBookScope.ASSISTANT, "assistant-a")
+        assertEquals(listOf("global", "assistant-b", "chat-a", "chat-b"), afterAssistantDelete.map { it.id })
+
+        val afterChatHistoryClear = afterAssistantDelete.withoutScopedOwner(WorldBookScope.CHAT)
+        assertEquals(listOf("global", "assistant-b"), afterChatHistoryClear.map { it.id })
+        assertEquals(books, books.withoutScopedOwner(WorldBookScope.GLOBAL))
+
+        val afterCommittedOwnerCleanup = books.withoutScopedOwners(
+            scope = WorldBookScope.CHAT,
+            ownerIds = setOf("chat-a", "chat-b")
+        )
+        assertEquals(listOf("global", "assistant-a", "assistant-b"), afterCommittedOwnerCleanup.map { it.id })
+        assertEquals(books, books.withoutScopedOwners(WorldBookScope.CHAT, emptySet()))
+    }
+
+    @Test
+    fun tokenBudgetSkipsOversizedPriorityEntryAndStillFitsLaterEntries() {
+        val book = worldBook(
+            name = "budget",
+            entries = listOf(
+                entry("too-large", listOf("budget"), "甲乙丙丁", priority = 30),
+                entry("medium", listOf("budget"), "中文", priority = 20),
+                entry("small", listOf("budget"), "ok", priority = 10)
+            )
+        )
+
+        val selection = WorldBookResolver.select(
+            books = listOf(book),
+            messages = listOf(ChatMessage(Role.USER, "budget")),
+            assistantId = "assistant",
+            chatSessionId = null,
+            tokenBudget = 3
+        )
+
+        assertEquals(listOf("medium", "small"), selection.selectedEntryIds)
+        assertEquals(listOf("too-large"), selection.skippedEntryIds)
+        assertEquals(3, selection.estimatedTokens)
+        assertEquals(listOf("中文", "ok"), selection.selectedSources.map { it.excerpt })
+        assertEquals("budget", selection.skippedSources.single().reason)
+        assertTrue(selection.context.contains("中文"))
+        assertTrue(selection.context.contains("ok"))
+        assertFalse(selection.context.contains("甲乙丙丁"))
+
+        assertEquals(2, WorldBookResolver.estimateTokens("中文"))
+        assertEquals(2, WorldBookResolver.estimateTokens("abcdef"))
+        assertEquals(2, WorldBookResolver.estimateTokens("中abc"))
+        assertEquals(0, WorldBookResolver.estimateTokens(" \n\t"))
+    }
+
+    @Test
+    fun nonPositiveBudgetProducesNoSelection() {
+        val selection = WorldBookResolver.select(
+            books = listOf(
+                worldBook(
+                    name = "constant",
+                    entries = listOf(entry("constant", emptyList(), "always", constant = true))
+                )
+            ),
+            messages = listOf(ChatMessage(Role.USER, "anything")),
+            assistantId = "assistant",
+            chatSessionId = "chat",
+            tokenBudget = 0
+        )
+
+        assertEquals(WorldBookSelection(), selection)
+    }
+
+    @Test
+    fun persistPhaseLabelDescribesRuntimeFinalizationNotDatabaseSave() {
+        // The chat surface now spans ChatScreen.kt and ChatChromeScreens.kt: the chrome, the
+        // markdown blocks and the pagination helpers moved out of the former. Both are read, so the
+        // assertion below stays meaningful wherever the declaration now lives.
+        val chatScreen = sequenceOf(
+            File("../feature/chat/src/main/java/com/muyuchat/feature/chat/ChatScreen.kt"),
+            File("feature/chat/src/main/java/com/muyuchat/feature/chat/ChatScreen.kt")
+        ).firstOrNull(File::isFile)
+            ?: error("Unable to locate ChatScreen.kt")
+        val directory = chatScreen.parentFile
+        // P9/S15: the phase-label helpers moved to ChatReasoningPerformanceScreens.kt, so the
+        // reader concatenates it as well; the PERSIST label contract it pins is unchanged.
+        val source = listOf("ChatScreen.kt", "ChatChromeScreens.kt", "ChatReasoningPerformanceScreens.kt").joinToString("\n") { name ->
+            File(directory, name).takeIf(File::isFile)?.readText(Charsets.UTF_8).orEmpty()
+        }
+        val persistLabel = Regex("""GenerationPhase\.PERSIST\s*->\s*\"([^\"]+)\"""")
+            .find(source)
+            ?.groupValues
+            ?.get(1)
+            ?: error("Missing PERSIST label")
+
+        assertFalse(persistLabel.contains("\\u4fdd\\u5b58\\u5bf9\\u8bdd"))
+        assertTrue(persistLabel.contains("\\u63a8\\u7406\\u6536\\u5c3e"))
+    }
+
+    private fun entry(
+        id: String,
+        keys: List<String>,
+        content: String,
+        constant: Boolean = false,
+        priority: Int = 0
+    ): WorldBookEntry = WorldBookEntry(
+        id = id,
+        keys = keys,
+        content = content,
+        constant = constant,
+        priority = priority
+    )
+
+    private fun worldBook(
+        name: String,
+        scope: WorldBookScope = WorldBookScope.GLOBAL,
+        assistantId: String? = null,
+        chatSessionId: String? = null,
+        enabled: Boolean = true,
+        entries: List<WorldBookEntry>
+    ): WorldBookRecord = WorldBookRecord(
+        id = name,
+        name = name,
+        scope = scope,
+        assistantId = assistantId,
+        chatSessionId = chatSessionId,
+        enabled = enabled,
+        entries = entries
+    )
+}

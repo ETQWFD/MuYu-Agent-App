@@ -1,0 +1,2546 @@
+{
+  "title": "MCA APK 16 KB Page-Size Alignment Audit",
+  "apk_path": "artifacts\\releases\\ui-v9-final2\\MCA-v0.2.4-arm64-v8a.apk",
+  "apk_sha256": "11d6bca94e64efe4d45d50ed6e11acbf9dedcc046469ad7695620c42bb213cc2",
+  "target_page_size_bytes": 16384,
+  "rule_scope": "Android-loadable ABI ELF64 libraries; Hexagon ELF32 DSP companions are reported separately and exempt",
+  "total_binaries_scanned": 94,
+  "applicable_binaries": 72,
+  "compliant_binaries": 72,
+  "non_compliant_binaries": 0,
+  "exempt_hexagon_dsp_binaries": 22,
+  "binaries": [
+    {
+      "path": "lib/arm64-v8a/libCalculator_skel.so",
+      "abi": "arm64-v8a",
+      "machine": 164,
+      "elf_class": "ELF32",
+      "scope": "hexagon_dsp_companion",
+      "is_16kb_applicable": false,
+      "machine_matches_abi": true,
+      "is_16kb_compliant": true,
+      "alignment_meets_16kb": false,
+      "pt_load_segments": [
+        {
+          "p_align": 4096,
+          "congruent": true
+        },
+        {
+          "p_align": 4096,
+          "congruent": true
+        }
+      ],
+      "details": "Qualcomm Hexagon ELF32 DSP companion; Android 16 KB PT_LOAD rule is not applicable"
+    },
+    {
+      "path": "lib/arm64-v8a/libLiteRtCompilerPlugin_Qualcomm.so",
+      "abi": "arm64-v8a",
+      "machine": 183,
+      "elf_class": "ELF64",
+      "scope": "android_abi",
+      "is_16kb_applicable": true,
+      "machine_matches_abi": true,
+      "is_16kb_compliant": true,
+      "alignment_meets_16kb": true,
+      "pt_load_segments": [
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        }
+      ],
+      "details": "All PT_LOAD segments meet 16 KB alignment"
+    },
+    {
+      "path": "lib/arm64-v8a/libLiteRtDispatch_Qualcomm.so",
+      "abi": "arm64-v8a",
+      "machine": 183,
+      "elf_class": "ELF64",
+      "scope": "android_abi",
+      "is_16kb_applicable": true,
+      "machine_matches_abi": true,
+      "is_16kb_compliant": true,
+      "alignment_meets_16kb": true,
+      "pt_load_segments": [
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        }
+      ],
+      "details": "All PT_LOAD segments meet 16 KB alignment"
+    },
+    {
+      "path": "lib/arm64-v8a/libMNN.so",
+      "abi": "arm64-v8a",
+      "machine": 183,
+      "elf_class": "ELF64",
+      "scope": "android_abi",
+      "is_16kb_applicable": true,
+      "machine_matches_abi": true,
+      "is_16kb_compliant": true,
+      "alignment_meets_16kb": true,
+      "pt_load_segments": [
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        }
+      ],
+      "details": "All PT_LOAD segments meet 16 KB alignment"
+    },
+    {
+      "path": "lib/arm64-v8a/libMNNAudio.so",
+      "abi": "arm64-v8a",
+      "machine": 183,
+      "elf_class": "ELF64",
+      "scope": "android_abi",
+      "is_16kb_applicable": true,
+      "machine_matches_abi": true,
+      "is_16kb_compliant": true,
+      "alignment_meets_16kb": true,
+      "pt_load_segments": [
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        }
+      ],
+      "details": "All PT_LOAD segments meet 16 KB alignment"
+    },
+    {
+      "path": "lib/arm64-v8a/libMNNOpenCV.so",
+      "abi": "arm64-v8a",
+      "machine": 183,
+      "elf_class": "ELF64",
+      "scope": "android_abi",
+      "is_16kb_applicable": true,
+      "machine_matches_abi": true,
+      "is_16kb_compliant": true,
+      "alignment_meets_16kb": true,
+      "pt_load_segments": [
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        }
+      ],
+      "details": "All PT_LOAD segments meet 16 KB alignment"
+    },
+    {
+      "path": "lib/arm64-v8a/libMNN_CL.so",
+      "abi": "arm64-v8a",
+      "machine": 183,
+      "elf_class": "ELF64",
+      "scope": "android_abi",
+      "is_16kb_applicable": true,
+      "machine_matches_abi": true,
+      "is_16kb_compliant": true,
+      "alignment_meets_16kb": true,
+      "pt_load_segments": [
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        }
+      ],
+      "details": "All PT_LOAD segments meet 16 KB alignment"
+    },
+    {
+      "path": "lib/arm64-v8a/libMNN_Express.so",
+      "abi": "arm64-v8a",
+      "machine": 183,
+      "elf_class": "ELF64",
+      "scope": "android_abi",
+      "is_16kb_applicable": true,
+      "machine_matches_abi": true,
+      "is_16kb_compliant": true,
+      "alignment_meets_16kb": true,
+      "pt_load_segments": [
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        }
+      ],
+      "details": "All PT_LOAD segments meet 16 KB alignment"
+    },
+    {
+      "path": "lib/arm64-v8a/libPlatformValidatorShared.so",
+      "abi": "arm64-v8a",
+      "machine": 183,
+      "elf_class": "ELF64",
+      "scope": "android_abi",
+      "is_16kb_applicable": true,
+      "machine_matches_abi": true,
+      "is_16kb_compliant": true,
+      "alignment_meets_16kb": true,
+      "pt_load_segments": [
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        }
+      ],
+      "details": "All PT_LOAD segments meet 16 KB alignment"
+    },
+    {
+      "path": "lib/arm64-v8a/libQnnChrometraceProfilingReader.so",
+      "abi": "arm64-v8a",
+      "machine": 183,
+      "elf_class": "ELF64",
+      "scope": "android_abi",
+      "is_16kb_applicable": true,
+      "machine_matches_abi": true,
+      "is_16kb_compliant": true,
+      "alignment_meets_16kb": true,
+      "pt_load_segments": [
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        }
+      ],
+      "details": "All PT_LOAD segments meet 16 KB alignment"
+    },
+    {
+      "path": "lib/arm64-v8a/libQnnHta.so",
+      "abi": "arm64-v8a",
+      "machine": 183,
+      "elf_class": "ELF64",
+      "scope": "android_abi",
+      "is_16kb_applicable": true,
+      "machine_matches_abi": true,
+      "is_16kb_compliant": true,
+      "alignment_meets_16kb": true,
+      "pt_load_segments": [
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        }
+      ],
+      "details": "All PT_LOAD segments meet 16 KB alignment"
+    },
+    {
+      "path": "lib/arm64-v8a/libQnnHtaNetRunExtensions.so",
+      "abi": "arm64-v8a",
+      "machine": 183,
+      "elf_class": "ELF64",
+      "scope": "android_abi",
+      "is_16kb_applicable": true,
+      "machine_matches_abi": true,
+      "is_16kb_compliant": true,
+      "alignment_meets_16kb": true,
+      "pt_load_segments": [
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        }
+      ],
+      "details": "All PT_LOAD segments meet 16 KB alignment"
+    },
+    {
+      "path": "lib/arm64-v8a/libQnnHtp.so",
+      "abi": "arm64-v8a",
+      "machine": 183,
+      "elf_class": "ELF64",
+      "scope": "android_abi",
+      "is_16kb_applicable": true,
+      "machine_matches_abi": true,
+      "is_16kb_compliant": true,
+      "alignment_meets_16kb": true,
+      "pt_load_segments": [
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        }
+      ],
+      "details": "All PT_LOAD segments meet 16 KB alignment"
+    },
+    {
+      "path": "lib/arm64-v8a/libQnnHtpNetRunExtensions.so",
+      "abi": "arm64-v8a",
+      "machine": 183,
+      "elf_class": "ELF64",
+      "scope": "android_abi",
+      "is_16kb_applicable": true,
+      "machine_matches_abi": true,
+      "is_16kb_compliant": true,
+      "alignment_meets_16kb": true,
+      "pt_load_segments": [
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        }
+      ],
+      "details": "All PT_LOAD segments meet 16 KB alignment"
+    },
+    {
+      "path": "lib/arm64-v8a/libQnnHtpOptraceProfilingReader.so",
+      "abi": "arm64-v8a",
+      "machine": 183,
+      "elf_class": "ELF64",
+      "scope": "android_abi",
+      "is_16kb_applicable": true,
+      "machine_matches_abi": true,
+      "is_16kb_compliant": true,
+      "alignment_meets_16kb": true,
+      "pt_load_segments": [
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        }
+      ],
+      "details": "All PT_LOAD segments meet 16 KB alignment"
+    },
+    {
+      "path": "lib/arm64-v8a/libQnnHtpPrepare.so",
+      "abi": "arm64-v8a",
+      "machine": 183,
+      "elf_class": "ELF64",
+      "scope": "android_abi",
+      "is_16kb_applicable": true,
+      "machine_matches_abi": true,
+      "is_16kb_compliant": true,
+      "alignment_meets_16kb": true,
+      "pt_load_segments": [
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        }
+      ],
+      "details": "All PT_LOAD segments meet 16 KB alignment"
+    },
+    {
+      "path": "lib/arm64-v8a/libQnnHtpProfilingReader.so",
+      "abi": "arm64-v8a",
+      "machine": 183,
+      "elf_class": "ELF64",
+      "scope": "android_abi",
+      "is_16kb_applicable": true,
+      "machine_matches_abi": true,
+      "is_16kb_compliant": true,
+      "alignment_meets_16kb": true,
+      "pt_load_segments": [
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        }
+      ],
+      "details": "All PT_LOAD segments meet 16 KB alignment"
+    },
+    {
+      "path": "lib/arm64-v8a/libQnnHtpV68.so",
+      "abi": "arm64-v8a",
+      "machine": 164,
+      "elf_class": "ELF32",
+      "scope": "hexagon_dsp_companion",
+      "is_16kb_applicable": false,
+      "machine_matches_abi": true,
+      "is_16kb_compliant": true,
+      "alignment_meets_16kb": false,
+      "pt_load_segments": [
+        {
+          "p_align": 4096,
+          "congruent": true
+        },
+        {
+          "p_align": 4096,
+          "congruent": true
+        }
+      ],
+      "details": "Qualcomm Hexagon ELF32 DSP companion; Android 16 KB PT_LOAD rule is not applicable"
+    },
+    {
+      "path": "lib/arm64-v8a/libQnnHtpV68CalculatorStub.so",
+      "abi": "arm64-v8a",
+      "machine": 183,
+      "elf_class": "ELF64",
+      "scope": "android_abi",
+      "is_16kb_applicable": true,
+      "machine_matches_abi": true,
+      "is_16kb_compliant": true,
+      "alignment_meets_16kb": true,
+      "pt_load_segments": [
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        }
+      ],
+      "details": "All PT_LOAD segments meet 16 KB alignment"
+    },
+    {
+      "path": "lib/arm64-v8a/libQnnHtpV68Skel.so",
+      "abi": "arm64-v8a",
+      "machine": 164,
+      "elf_class": "ELF32",
+      "scope": "hexagon_dsp_companion",
+      "is_16kb_applicable": false,
+      "machine_matches_abi": true,
+      "is_16kb_compliant": true,
+      "alignment_meets_16kb": false,
+      "pt_load_segments": [
+        {
+          "p_align": 4096,
+          "congruent": true
+        },
+        {
+          "p_align": 4096,
+          "congruent": true
+        }
+      ],
+      "details": "Qualcomm Hexagon ELF32 DSP companion; Android 16 KB PT_LOAD rule is not applicable"
+    },
+    {
+      "path": "lib/arm64-v8a/libQnnHtpV68Stub.so",
+      "abi": "arm64-v8a",
+      "machine": 183,
+      "elf_class": "ELF64",
+      "scope": "android_abi",
+      "is_16kb_applicable": true,
+      "machine_matches_abi": true,
+      "is_16kb_compliant": true,
+      "alignment_meets_16kb": true,
+      "pt_load_segments": [
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        }
+      ],
+      "details": "All PT_LOAD segments meet 16 KB alignment"
+    },
+    {
+      "path": "lib/arm64-v8a/libQnnHtpV69.so",
+      "abi": "arm64-v8a",
+      "machine": 164,
+      "elf_class": "ELF32",
+      "scope": "hexagon_dsp_companion",
+      "is_16kb_applicable": false,
+      "machine_matches_abi": true,
+      "is_16kb_compliant": true,
+      "alignment_meets_16kb": false,
+      "pt_load_segments": [
+        {
+          "p_align": 4096,
+          "congruent": true
+        },
+        {
+          "p_align": 4096,
+          "congruent": true
+        }
+      ],
+      "details": "Qualcomm Hexagon ELF32 DSP companion; Android 16 KB PT_LOAD rule is not applicable"
+    },
+    {
+      "path": "lib/arm64-v8a/libQnnHtpV69CalculatorStub.so",
+      "abi": "arm64-v8a",
+      "machine": 183,
+      "elf_class": "ELF64",
+      "scope": "android_abi",
+      "is_16kb_applicable": true,
+      "machine_matches_abi": true,
+      "is_16kb_compliant": true,
+      "alignment_meets_16kb": true,
+      "pt_load_segments": [
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        }
+      ],
+      "details": "All PT_LOAD segments meet 16 KB alignment"
+    },
+    {
+      "path": "lib/arm64-v8a/libQnnHtpV69Skel.so",
+      "abi": "arm64-v8a",
+      "machine": 164,
+      "elf_class": "ELF32",
+      "scope": "hexagon_dsp_companion",
+      "is_16kb_applicable": false,
+      "machine_matches_abi": true,
+      "is_16kb_compliant": true,
+      "alignment_meets_16kb": false,
+      "pt_load_segments": [
+        {
+          "p_align": 4096,
+          "congruent": true
+        },
+        {
+          "p_align": 4096,
+          "congruent": true
+        }
+      ],
+      "details": "Qualcomm Hexagon ELF32 DSP companion; Android 16 KB PT_LOAD rule is not applicable"
+    },
+    {
+      "path": "lib/arm64-v8a/libQnnHtpV69Stub.so",
+      "abi": "arm64-v8a",
+      "machine": 183,
+      "elf_class": "ELF64",
+      "scope": "android_abi",
+      "is_16kb_applicable": true,
+      "machine_matches_abi": true,
+      "is_16kb_compliant": true,
+      "alignment_meets_16kb": true,
+      "pt_load_segments": [
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        }
+      ],
+      "details": "All PT_LOAD segments meet 16 KB alignment"
+    },
+    {
+      "path": "lib/arm64-v8a/libQnnHtpV73.so",
+      "abi": "arm64-v8a",
+      "machine": 164,
+      "elf_class": "ELF32",
+      "scope": "hexagon_dsp_companion",
+      "is_16kb_applicable": false,
+      "machine_matches_abi": true,
+      "is_16kb_compliant": true,
+      "alignment_meets_16kb": false,
+      "pt_load_segments": [
+        {
+          "p_align": 4096,
+          "congruent": true
+        },
+        {
+          "p_align": 4096,
+          "congruent": true
+        }
+      ],
+      "details": "Qualcomm Hexagon ELF32 DSP companion; Android 16 KB PT_LOAD rule is not applicable"
+    },
+    {
+      "path": "lib/arm64-v8a/libQnnHtpV73CalculatorStub.so",
+      "abi": "arm64-v8a",
+      "machine": 183,
+      "elf_class": "ELF64",
+      "scope": "android_abi",
+      "is_16kb_applicable": true,
+      "machine_matches_abi": true,
+      "is_16kb_compliant": true,
+      "alignment_meets_16kb": true,
+      "pt_load_segments": [
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        }
+      ],
+      "details": "All PT_LOAD segments meet 16 KB alignment"
+    },
+    {
+      "path": "lib/arm64-v8a/libQnnHtpV73QemuDriver.so",
+      "abi": "arm64-v8a",
+      "machine": 164,
+      "elf_class": "ELF32",
+      "scope": "hexagon_dsp_companion",
+      "is_16kb_applicable": false,
+      "machine_matches_abi": true,
+      "is_16kb_compliant": true,
+      "alignment_meets_16kb": false,
+      "pt_load_segments": [
+        {
+          "p_align": 4096,
+          "congruent": true
+        },
+        {
+          "p_align": 4096,
+          "congruent": true
+        }
+      ],
+      "details": "Qualcomm Hexagon ELF32 DSP companion; Android 16 KB PT_LOAD rule is not applicable"
+    },
+    {
+      "path": "lib/arm64-v8a/libQnnHtpV73Skel.so",
+      "abi": "arm64-v8a",
+      "machine": 164,
+      "elf_class": "ELF32",
+      "scope": "hexagon_dsp_companion",
+      "is_16kb_applicable": false,
+      "machine_matches_abi": true,
+      "is_16kb_compliant": true,
+      "alignment_meets_16kb": false,
+      "pt_load_segments": [
+        {
+          "p_align": 4096,
+          "congruent": true
+        },
+        {
+          "p_align": 4096,
+          "congruent": true
+        }
+      ],
+      "details": "Qualcomm Hexagon ELF32 DSP companion; Android 16 KB PT_LOAD rule is not applicable"
+    },
+    {
+      "path": "lib/arm64-v8a/libQnnHtpV73Stub.so",
+      "abi": "arm64-v8a",
+      "machine": 183,
+      "elf_class": "ELF64",
+      "scope": "android_abi",
+      "is_16kb_applicable": true,
+      "machine_matches_abi": true,
+      "is_16kb_compliant": true,
+      "alignment_meets_16kb": true,
+      "pt_load_segments": [
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        }
+      ],
+      "details": "All PT_LOAD segments meet 16 KB alignment"
+    },
+    {
+      "path": "lib/arm64-v8a/libQnnHtpV75.so",
+      "abi": "arm64-v8a",
+      "machine": 164,
+      "elf_class": "ELF32",
+      "scope": "hexagon_dsp_companion",
+      "is_16kb_applicable": false,
+      "machine_matches_abi": true,
+      "is_16kb_compliant": true,
+      "alignment_meets_16kb": false,
+      "pt_load_segments": [
+        {
+          "p_align": 4096,
+          "congruent": true
+        },
+        {
+          "p_align": 4096,
+          "congruent": true
+        }
+      ],
+      "details": "Qualcomm Hexagon ELF32 DSP companion; Android 16 KB PT_LOAD rule is not applicable"
+    },
+    {
+      "path": "lib/arm64-v8a/libQnnHtpV75CalculatorStub.so",
+      "abi": "arm64-v8a",
+      "machine": 183,
+      "elf_class": "ELF64",
+      "scope": "android_abi",
+      "is_16kb_applicable": true,
+      "machine_matches_abi": true,
+      "is_16kb_compliant": true,
+      "alignment_meets_16kb": true,
+      "pt_load_segments": [
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        }
+      ],
+      "details": "All PT_LOAD segments meet 16 KB alignment"
+    },
+    {
+      "path": "lib/arm64-v8a/libQnnHtpV75Skel.so",
+      "abi": "arm64-v8a",
+      "machine": 164,
+      "elf_class": "ELF32",
+      "scope": "hexagon_dsp_companion",
+      "is_16kb_applicable": false,
+      "machine_matches_abi": true,
+      "is_16kb_compliant": true,
+      "alignment_meets_16kb": false,
+      "pt_load_segments": [
+        {
+          "p_align": 4096,
+          "congruent": true
+        },
+        {
+          "p_align": 4096,
+          "congruent": true
+        }
+      ],
+      "details": "Qualcomm Hexagon ELF32 DSP companion; Android 16 KB PT_LOAD rule is not applicable"
+    },
+    {
+      "path": "lib/arm64-v8a/libQnnHtpV75Stub.so",
+      "abi": "arm64-v8a",
+      "machine": 183,
+      "elf_class": "ELF64",
+      "scope": "android_abi",
+      "is_16kb_applicable": true,
+      "machine_matches_abi": true,
+      "is_16kb_compliant": true,
+      "alignment_meets_16kb": true,
+      "pt_load_segments": [
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        }
+      ],
+      "details": "All PT_LOAD segments meet 16 KB alignment"
+    },
+    {
+      "path": "lib/arm64-v8a/libQnnHtpV79.so",
+      "abi": "arm64-v8a",
+      "machine": 164,
+      "elf_class": "ELF32",
+      "scope": "hexagon_dsp_companion",
+      "is_16kb_applicable": false,
+      "machine_matches_abi": true,
+      "is_16kb_compliant": true,
+      "alignment_meets_16kb": false,
+      "pt_load_segments": [
+        {
+          "p_align": 4096,
+          "congruent": true
+        },
+        {
+          "p_align": 4096,
+          "congruent": true
+        }
+      ],
+      "details": "Qualcomm Hexagon ELF32 DSP companion; Android 16 KB PT_LOAD rule is not applicable"
+    },
+    {
+      "path": "lib/arm64-v8a/libQnnHtpV79CalculatorStub.so",
+      "abi": "arm64-v8a",
+      "machine": 183,
+      "elf_class": "ELF64",
+      "scope": "android_abi",
+      "is_16kb_applicable": true,
+      "machine_matches_abi": true,
+      "is_16kb_compliant": true,
+      "alignment_meets_16kb": true,
+      "pt_load_segments": [
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        }
+      ],
+      "details": "All PT_LOAD segments meet 16 KB alignment"
+    },
+    {
+      "path": "lib/arm64-v8a/libQnnHtpV79Skel.so",
+      "abi": "arm64-v8a",
+      "machine": 164,
+      "elf_class": "ELF32",
+      "scope": "hexagon_dsp_companion",
+      "is_16kb_applicable": false,
+      "machine_matches_abi": true,
+      "is_16kb_compliant": true,
+      "alignment_meets_16kb": false,
+      "pt_load_segments": [
+        {
+          "p_align": 4096,
+          "congruent": true
+        },
+        {
+          "p_align": 4096,
+          "congruent": true
+        }
+      ],
+      "details": "Qualcomm Hexagon ELF32 DSP companion; Android 16 KB PT_LOAD rule is not applicable"
+    },
+    {
+      "path": "lib/arm64-v8a/libQnnHtpV79Stub.so",
+      "abi": "arm64-v8a",
+      "machine": 183,
+      "elf_class": "ELF64",
+      "scope": "android_abi",
+      "is_16kb_applicable": true,
+      "machine_matches_abi": true,
+      "is_16kb_compliant": true,
+      "alignment_meets_16kb": true,
+      "pt_load_segments": [
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        }
+      ],
+      "details": "All PT_LOAD segments meet 16 KB alignment"
+    },
+    {
+      "path": "lib/arm64-v8a/libQnnHtpV81.so",
+      "abi": "arm64-v8a",
+      "machine": 164,
+      "elf_class": "ELF32",
+      "scope": "hexagon_dsp_companion",
+      "is_16kb_applicable": false,
+      "machine_matches_abi": true,
+      "is_16kb_compliant": true,
+      "alignment_meets_16kb": false,
+      "pt_load_segments": [
+        {
+          "p_align": 4096,
+          "congruent": true
+        },
+        {
+          "p_align": 4096,
+          "congruent": true
+        }
+      ],
+      "details": "Qualcomm Hexagon ELF32 DSP companion; Android 16 KB PT_LOAD rule is not applicable"
+    },
+    {
+      "path": "lib/arm64-v8a/libQnnHtpV81CalculatorStub.so",
+      "abi": "arm64-v8a",
+      "machine": 183,
+      "elf_class": "ELF64",
+      "scope": "android_abi",
+      "is_16kb_applicable": true,
+      "machine_matches_abi": true,
+      "is_16kb_compliant": true,
+      "alignment_meets_16kb": true,
+      "pt_load_segments": [
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        }
+      ],
+      "details": "All PT_LOAD segments meet 16 KB alignment"
+    },
+    {
+      "path": "lib/arm64-v8a/libQnnHtpV81Skel.so",
+      "abi": "arm64-v8a",
+      "machine": 164,
+      "elf_class": "ELF32",
+      "scope": "hexagon_dsp_companion",
+      "is_16kb_applicable": false,
+      "machine_matches_abi": true,
+      "is_16kb_compliant": true,
+      "alignment_meets_16kb": false,
+      "pt_load_segments": [
+        {
+          "p_align": 4096,
+          "congruent": true
+        },
+        {
+          "p_align": 4096,
+          "congruent": true
+        }
+      ],
+      "details": "Qualcomm Hexagon ELF32 DSP companion; Android 16 KB PT_LOAD rule is not applicable"
+    },
+    {
+      "path": "lib/arm64-v8a/libQnnHtpV81Stub.so",
+      "abi": "arm64-v8a",
+      "machine": 183,
+      "elf_class": "ELF64",
+      "scope": "android_abi",
+      "is_16kb_applicable": true,
+      "machine_matches_abi": true,
+      "is_16kb_compliant": true,
+      "alignment_meets_16kb": true,
+      "pt_load_segments": [
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        }
+      ],
+      "details": "All PT_LOAD segments meet 16 KB alignment"
+    },
+    {
+      "path": "lib/arm64-v8a/libQnnIr.so",
+      "abi": "arm64-v8a",
+      "machine": 183,
+      "elf_class": "ELF64",
+      "scope": "android_abi",
+      "is_16kb_applicable": true,
+      "machine_matches_abi": true,
+      "is_16kb_compliant": true,
+      "alignment_meets_16kb": true,
+      "pt_load_segments": [
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        }
+      ],
+      "details": "All PT_LOAD segments meet 16 KB alignment"
+    },
+    {
+      "path": "lib/arm64-v8a/libQnnJsonProfilingReader.so",
+      "abi": "arm64-v8a",
+      "machine": 183,
+      "elf_class": "ELF64",
+      "scope": "android_abi",
+      "is_16kb_applicable": true,
+      "machine_matches_abi": true,
+      "is_16kb_compliant": true,
+      "alignment_meets_16kb": true,
+      "pt_load_segments": [
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        }
+      ],
+      "details": "All PT_LOAD segments meet 16 KB alignment"
+    },
+    {
+      "path": "lib/arm64-v8a/libQnnModelDlc.so",
+      "abi": "arm64-v8a",
+      "machine": 183,
+      "elf_class": "ELF64",
+      "scope": "android_abi",
+      "is_16kb_applicable": true,
+      "machine_matches_abi": true,
+      "is_16kb_compliant": true,
+      "alignment_meets_16kb": true,
+      "pt_load_segments": [
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        }
+      ],
+      "details": "All PT_LOAD segments meet 16 KB alignment"
+    },
+    {
+      "path": "lib/arm64-v8a/libQnnNetRunDirectV79Skel.so",
+      "abi": "arm64-v8a",
+      "machine": 164,
+      "elf_class": "ELF32",
+      "scope": "hexagon_dsp_companion",
+      "is_16kb_applicable": false,
+      "machine_matches_abi": true,
+      "is_16kb_compliant": true,
+      "alignment_meets_16kb": false,
+      "pt_load_segments": [
+        {
+          "p_align": 4096,
+          "congruent": true
+        },
+        {
+          "p_align": 4096,
+          "congruent": true
+        }
+      ],
+      "details": "Qualcomm Hexagon ELF32 DSP companion; Android 16 KB PT_LOAD rule is not applicable"
+    },
+    {
+      "path": "lib/arm64-v8a/libQnnNetRunDirectV79Stub.so",
+      "abi": "arm64-v8a",
+      "machine": 183,
+      "elf_class": "ELF64",
+      "scope": "android_abi",
+      "is_16kb_applicable": true,
+      "machine_matches_abi": true,
+      "is_16kb_compliant": true,
+      "alignment_meets_16kb": true,
+      "pt_load_segments": [
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        }
+      ],
+      "details": "All PT_LOAD segments meet 16 KB alignment"
+    },
+    {
+      "path": "lib/arm64-v8a/libQnnNetRunDirectV81Skel.so",
+      "abi": "arm64-v8a",
+      "machine": 164,
+      "elf_class": "ELF32",
+      "scope": "hexagon_dsp_companion",
+      "is_16kb_applicable": false,
+      "machine_matches_abi": true,
+      "is_16kb_compliant": true,
+      "alignment_meets_16kb": false,
+      "pt_load_segments": [
+        {
+          "p_align": 4096,
+          "congruent": true
+        },
+        {
+          "p_align": 4096,
+          "congruent": true
+        }
+      ],
+      "details": "Qualcomm Hexagon ELF32 DSP companion; Android 16 KB PT_LOAD rule is not applicable"
+    },
+    {
+      "path": "lib/arm64-v8a/libQnnNetRunDirectV81Stub.so",
+      "abi": "arm64-v8a",
+      "machine": 183,
+      "elf_class": "ELF64",
+      "scope": "android_abi",
+      "is_16kb_applicable": true,
+      "machine_matches_abi": true,
+      "is_16kb_compliant": true,
+      "alignment_meets_16kb": true,
+      "pt_load_segments": [
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        }
+      ],
+      "details": "All PT_LOAD segments meet 16 KB alignment"
+    },
+    {
+      "path": "lib/arm64-v8a/libQnnSaver.so",
+      "abi": "arm64-v8a",
+      "machine": 183,
+      "elf_class": "ELF64",
+      "scope": "android_abi",
+      "is_16kb_applicable": true,
+      "machine_matches_abi": true,
+      "is_16kb_compliant": true,
+      "alignment_meets_16kb": true,
+      "pt_load_segments": [
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        }
+      ],
+      "details": "All PT_LOAD segments meet 16 KB alignment"
+    },
+    {
+      "path": "lib/arm64-v8a/libQnnSystem.so",
+      "abi": "arm64-v8a",
+      "machine": 183,
+      "elf_class": "ELF64",
+      "scope": "android_abi",
+      "is_16kb_applicable": true,
+      "machine_matches_abi": true,
+      "is_16kb_compliant": true,
+      "alignment_meets_16kb": true,
+      "pt_load_segments": [
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        }
+      ],
+      "details": "All PT_LOAD segments meet 16 KB alignment"
+    },
+    {
+      "path": "lib/arm64-v8a/libandroidx.graphics.path.so",
+      "abi": "arm64-v8a",
+      "machine": 183,
+      "elf_class": "ELF64",
+      "scope": "android_abi",
+      "is_16kb_applicable": true,
+      "machine_matches_abi": true,
+      "is_16kb_compliant": true,
+      "alignment_meets_16kb": true,
+      "pt_load_segments": [
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        }
+      ],
+      "details": "All PT_LOAD segments meet 16 KB alignment"
+    },
+    {
+      "path": "lib/arm64-v8a/libc++_shared.so",
+      "abi": "arm64-v8a",
+      "machine": 183,
+      "elf_class": "ELF64",
+      "scope": "android_abi",
+      "is_16kb_applicable": true,
+      "machine_matches_abi": true,
+      "is_16kb_compliant": true,
+      "alignment_meets_16kb": true,
+      "pt_load_segments": [
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        }
+      ],
+      "details": "All PT_LOAD segments meet 16 KB alignment"
+    },
+    {
+      "path": "lib/arm64-v8a/libcalculator.so",
+      "abi": "arm64-v8a",
+      "machine": 183,
+      "elf_class": "ELF64",
+      "scope": "android_abi",
+      "is_16kb_applicable": true,
+      "machine_matches_abi": true,
+      "is_16kb_compliant": true,
+      "alignment_meets_16kb": true,
+      "pt_load_segments": [
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        }
+      ],
+      "details": "All PT_LOAD segments meet 16 KB alignment"
+    },
+    {
+      "path": "lib/arm64-v8a/libgeniex-proc-vision.so",
+      "abi": "arm64-v8a",
+      "machine": 183,
+      "elf_class": "ELF64",
+      "scope": "android_abi",
+      "is_16kb_applicable": true,
+      "machine_matches_abi": true,
+      "is_16kb_compliant": true,
+      "alignment_meets_16kb": true,
+      "pt_load_segments": [
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        }
+      ],
+      "details": "All PT_LOAD segments meet 16 KB alignment"
+    },
+    {
+      "path": "lib/arm64-v8a/libgeniex-proc.so",
+      "abi": "arm64-v8a",
+      "machine": 183,
+      "elf_class": "ELF64",
+      "scope": "android_abi",
+      "is_16kb_applicable": true,
+      "machine_matches_abi": true,
+      "is_16kb_compliant": true,
+      "alignment_meets_16kb": true,
+      "pt_load_segments": [
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        }
+      ],
+      "details": "All PT_LOAD segments meet 16 KB alignment"
+    },
+    {
+      "path": "lib/arm64-v8a/libgeniex.so",
+      "abi": "arm64-v8a",
+      "machine": 183,
+      "elf_class": "ELF64",
+      "scope": "android_abi",
+      "is_16kb_applicable": true,
+      "machine_matches_abi": true,
+      "is_16kb_compliant": true,
+      "alignment_meets_16kb": true,
+      "pt_load_segments": [
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        }
+      ],
+      "details": "All PT_LOAD segments meet 16 KB alignment"
+    },
+    {
+      "path": "lib/arm64-v8a/libgeniex_core.so",
+      "abi": "arm64-v8a",
+      "machine": 183,
+      "elf_class": "ELF64",
+      "scope": "android_abi",
+      "is_16kb_applicable": true,
+      "machine_matches_abi": true,
+      "is_16kb_compliant": true,
+      "alignment_meets_16kb": true,
+      "pt_load_segments": [
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        }
+      ],
+      "details": "All PT_LOAD segments meet 16 KB alignment"
+    },
+    {
+      "path": "lib/arm64-v8a/libgeniex_plugin_llama_cpp.so",
+      "abi": "arm64-v8a",
+      "machine": 183,
+      "elf_class": "ELF64",
+      "scope": "android_abi",
+      "is_16kb_applicable": true,
+      "machine_matches_abi": true,
+      "is_16kb_compliant": true,
+      "alignment_meets_16kb": true,
+      "pt_load_segments": [
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        }
+      ],
+      "details": "All PT_LOAD segments meet 16 KB alignment"
+    },
+    {
+      "path": "lib/arm64-v8a/libgeniex_plugin_qairt.so",
+      "abi": "arm64-v8a",
+      "machine": 183,
+      "elf_class": "ELF64",
+      "scope": "android_abi",
+      "is_16kb_applicable": true,
+      "machine_matches_abi": true,
+      "is_16kb_compliant": true,
+      "alignment_meets_16kb": true,
+      "pt_load_segments": [
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        }
+      ],
+      "details": "All PT_LOAD segments meet 16 KB alignment"
+    },
+    {
+      "path": "lib/arm64-v8a/libgeniex_vlm.so",
+      "abi": "arm64-v8a",
+      "machine": 183,
+      "elf_class": "ELF64",
+      "scope": "android_abi",
+      "is_16kb_applicable": true,
+      "machine_matches_abi": true,
+      "is_16kb_compliant": true,
+      "alignment_meets_16kb": true,
+      "pt_load_segments": [
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        }
+      ],
+      "details": "All PT_LOAD segments meet 16 KB alignment"
+    },
+    {
+      "path": "lib/arm64-v8a/libggml-base.so",
+      "abi": "arm64-v8a",
+      "machine": 183,
+      "elf_class": "ELF64",
+      "scope": "android_abi",
+      "is_16kb_applicable": true,
+      "machine_matches_abi": true,
+      "is_16kb_compliant": true,
+      "alignment_meets_16kb": true,
+      "pt_load_segments": [
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        }
+      ],
+      "details": "All PT_LOAD segments meet 16 KB alignment"
+    },
+    {
+      "path": "lib/arm64-v8a/libggml-cpu-android_armv8.0_1.so",
+      "abi": "arm64-v8a",
+      "machine": 183,
+      "elf_class": "ELF64",
+      "scope": "android_abi",
+      "is_16kb_applicable": true,
+      "machine_matches_abi": true,
+      "is_16kb_compliant": true,
+      "alignment_meets_16kb": true,
+      "pt_load_segments": [
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        }
+      ],
+      "details": "All PT_LOAD segments meet 16 KB alignment"
+    },
+    {
+      "path": "lib/arm64-v8a/libggml-cpu-android_armv8.2_1.so",
+      "abi": "arm64-v8a",
+      "machine": 183,
+      "elf_class": "ELF64",
+      "scope": "android_abi",
+      "is_16kb_applicable": true,
+      "machine_matches_abi": true,
+      "is_16kb_compliant": true,
+      "alignment_meets_16kb": true,
+      "pt_load_segments": [
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        }
+      ],
+      "details": "All PT_LOAD segments meet 16 KB alignment"
+    },
+    {
+      "path": "lib/arm64-v8a/libggml-cpu-android_armv8.2_2.so",
+      "abi": "arm64-v8a",
+      "machine": 183,
+      "elf_class": "ELF64",
+      "scope": "android_abi",
+      "is_16kb_applicable": true,
+      "machine_matches_abi": true,
+      "is_16kb_compliant": true,
+      "alignment_meets_16kb": true,
+      "pt_load_segments": [
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        }
+      ],
+      "details": "All PT_LOAD segments meet 16 KB alignment"
+    },
+    {
+      "path": "lib/arm64-v8a/libggml-cpu-android_armv8.6_1.so",
+      "abi": "arm64-v8a",
+      "machine": 183,
+      "elf_class": "ELF64",
+      "scope": "android_abi",
+      "is_16kb_applicable": true,
+      "machine_matches_abi": true,
+      "is_16kb_compliant": true,
+      "alignment_meets_16kb": true,
+      "pt_load_segments": [
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        }
+      ],
+      "details": "All PT_LOAD segments meet 16 KB alignment"
+    },
+    {
+      "path": "lib/arm64-v8a/libggml-cpu-android_armv9.0_1.so",
+      "abi": "arm64-v8a",
+      "machine": 183,
+      "elf_class": "ELF64",
+      "scope": "android_abi",
+      "is_16kb_applicable": true,
+      "machine_matches_abi": true,
+      "is_16kb_compliant": true,
+      "alignment_meets_16kb": true,
+      "pt_load_segments": [
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        }
+      ],
+      "details": "All PT_LOAD segments meet 16 KB alignment"
+    },
+    {
+      "path": "lib/arm64-v8a/libggml-cpu-android_armv9.2_1.so",
+      "abi": "arm64-v8a",
+      "machine": 183,
+      "elf_class": "ELF64",
+      "scope": "android_abi",
+      "is_16kb_applicable": true,
+      "machine_matches_abi": true,
+      "is_16kb_compliant": true,
+      "alignment_meets_16kb": true,
+      "pt_load_segments": [
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        }
+      ],
+      "details": "All PT_LOAD segments meet 16 KB alignment"
+    },
+    {
+      "path": "lib/arm64-v8a/libggml-cpu-android_armv9.2_2.so",
+      "abi": "arm64-v8a",
+      "machine": 183,
+      "elf_class": "ELF64",
+      "scope": "android_abi",
+      "is_16kb_applicable": true,
+      "machine_matches_abi": true,
+      "is_16kb_compliant": true,
+      "alignment_meets_16kb": true,
+      "pt_load_segments": [
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        }
+      ],
+      "details": "All PT_LOAD segments meet 16 KB alignment"
+    },
+    {
+      "path": "lib/arm64-v8a/libggml-cpu.so",
+      "abi": "arm64-v8a",
+      "machine": 183,
+      "elf_class": "ELF64",
+      "scope": "android_abi",
+      "is_16kb_applicable": true,
+      "machine_matches_abi": true,
+      "is_16kb_compliant": true,
+      "alignment_meets_16kb": true,
+      "pt_load_segments": [
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        }
+      ],
+      "details": "All PT_LOAD segments meet 16 KB alignment"
+    },
+    {
+      "path": "lib/arm64-v8a/libggml-hexagon.so",
+      "abi": "arm64-v8a",
+      "machine": 183,
+      "elf_class": "ELF64",
+      "scope": "android_abi",
+      "is_16kb_applicable": true,
+      "machine_matches_abi": true,
+      "is_16kb_compliant": true,
+      "alignment_meets_16kb": true,
+      "pt_load_segments": [
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        }
+      ],
+      "details": "All PT_LOAD segments meet 16 KB alignment"
+    },
+    {
+      "path": "lib/arm64-v8a/libggml-htp-v68.so",
+      "abi": "arm64-v8a",
+      "machine": 164,
+      "elf_class": "ELF32",
+      "scope": "hexagon_dsp_companion",
+      "is_16kb_applicable": false,
+      "machine_matches_abi": true,
+      "is_16kb_compliant": true,
+      "alignment_meets_16kb": false,
+      "pt_load_segments": [
+        {
+          "p_align": 4096,
+          "congruent": true
+        },
+        {
+          "p_align": 4096,
+          "congruent": true
+        }
+      ],
+      "details": "Qualcomm Hexagon ELF32 DSP companion; Android 16 KB PT_LOAD rule is not applicable"
+    },
+    {
+      "path": "lib/arm64-v8a/libggml-htp-v69.so",
+      "abi": "arm64-v8a",
+      "machine": 164,
+      "elf_class": "ELF32",
+      "scope": "hexagon_dsp_companion",
+      "is_16kb_applicable": false,
+      "machine_matches_abi": true,
+      "is_16kb_compliant": true,
+      "alignment_meets_16kb": false,
+      "pt_load_segments": [
+        {
+          "p_align": 4096,
+          "congruent": true
+        },
+        {
+          "p_align": 4096,
+          "congruent": true
+        }
+      ],
+      "details": "Qualcomm Hexagon ELF32 DSP companion; Android 16 KB PT_LOAD rule is not applicable"
+    },
+    {
+      "path": "lib/arm64-v8a/libggml-htp-v73.so",
+      "abi": "arm64-v8a",
+      "machine": 164,
+      "elf_class": "ELF32",
+      "scope": "hexagon_dsp_companion",
+      "is_16kb_applicable": false,
+      "machine_matches_abi": true,
+      "is_16kb_compliant": true,
+      "alignment_meets_16kb": false,
+      "pt_load_segments": [
+        {
+          "p_align": 4096,
+          "congruent": true
+        },
+        {
+          "p_align": 4096,
+          "congruent": true
+        }
+      ],
+      "details": "Qualcomm Hexagon ELF32 DSP companion; Android 16 KB PT_LOAD rule is not applicable"
+    },
+    {
+      "path": "lib/arm64-v8a/libggml-htp-v75.so",
+      "abi": "arm64-v8a",
+      "machine": 164,
+      "elf_class": "ELF32",
+      "scope": "hexagon_dsp_companion",
+      "is_16kb_applicable": false,
+      "machine_matches_abi": true,
+      "is_16kb_compliant": true,
+      "alignment_meets_16kb": false,
+      "pt_load_segments": [
+        {
+          "p_align": 4096,
+          "congruent": true
+        },
+        {
+          "p_align": 4096,
+          "congruent": true
+        }
+      ],
+      "details": "Qualcomm Hexagon ELF32 DSP companion; Android 16 KB PT_LOAD rule is not applicable"
+    },
+    {
+      "path": "lib/arm64-v8a/libggml-htp-v79.so",
+      "abi": "arm64-v8a",
+      "machine": 164,
+      "elf_class": "ELF32",
+      "scope": "hexagon_dsp_companion",
+      "is_16kb_applicable": false,
+      "machine_matches_abi": true,
+      "is_16kb_compliant": true,
+      "alignment_meets_16kb": false,
+      "pt_load_segments": [
+        {
+          "p_align": 4096,
+          "congruent": true
+        },
+        {
+          "p_align": 4096,
+          "congruent": true
+        }
+      ],
+      "details": "Qualcomm Hexagon ELF32 DSP companion; Android 16 KB PT_LOAD rule is not applicable"
+    },
+    {
+      "path": "lib/arm64-v8a/libggml-htp-v81.so",
+      "abi": "arm64-v8a",
+      "machine": 164,
+      "elf_class": "ELF32",
+      "scope": "hexagon_dsp_companion",
+      "is_16kb_applicable": false,
+      "machine_matches_abi": true,
+      "is_16kb_compliant": true,
+      "alignment_meets_16kb": false,
+      "pt_load_segments": [
+        {
+          "p_align": 4096,
+          "congruent": true
+        },
+        {
+          "p_align": 4096,
+          "congruent": true
+        }
+      ],
+      "details": "Qualcomm Hexagon ELF32 DSP companion; Android 16 KB PT_LOAD rule is not applicable"
+    },
+    {
+      "path": "lib/arm64-v8a/libggml-opencl-mca.so",
+      "abi": "arm64-v8a",
+      "machine": 183,
+      "elf_class": "ELF64",
+      "scope": "android_abi",
+      "is_16kb_applicable": true,
+      "machine_matches_abi": true,
+      "is_16kb_compliant": true,
+      "alignment_meets_16kb": true,
+      "pt_load_segments": [
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        }
+      ],
+      "details": "All PT_LOAD segments meet 16 KB alignment"
+    },
+    {
+      "path": "lib/arm64-v8a/libggml-opencl.so",
+      "abi": "arm64-v8a",
+      "machine": 183,
+      "elf_class": "ELF64",
+      "scope": "android_abi",
+      "is_16kb_applicable": true,
+      "machine_matches_abi": true,
+      "is_16kb_compliant": true,
+      "alignment_meets_16kb": true,
+      "pt_load_segments": [
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        }
+      ],
+      "details": "All PT_LOAD segments meet 16 KB alignment"
+    },
+    {
+      "path": "lib/arm64-v8a/libggml.so",
+      "abi": "arm64-v8a",
+      "machine": 183,
+      "elf_class": "ELF64",
+      "scope": "android_abi",
+      "is_16kb_applicable": true,
+      "machine_matches_abi": true,
+      "is_16kb_compliant": true,
+      "alignment_meets_16kb": true,
+      "pt_load_segments": [
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        }
+      ],
+      "details": "All PT_LOAD segments meet 16 KB alignment"
+    },
+    {
+      "path": "lib/arm64-v8a/libhta_hexagon_runtime_qnn.so",
+      "abi": "arm64-v8a",
+      "machine": 183,
+      "elf_class": "ELF64",
+      "scope": "android_abi",
+      "is_16kb_applicable": true,
+      "machine_matches_abi": true,
+      "is_16kb_compliant": true,
+      "alignment_meets_16kb": true,
+      "pt_load_segments": [
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        }
+      ],
+      "details": "All PT_LOAD segments meet 16 KB alignment"
+    },
+    {
+      "path": "lib/arm64-v8a/libhta_hexagon_runtime_snpe.so",
+      "abi": "arm64-v8a",
+      "machine": 183,
+      "elf_class": "ELF64",
+      "scope": "android_abi",
+      "is_16kb_applicable": true,
+      "machine_matches_abi": true,
+      "is_16kb_compliant": true,
+      "alignment_meets_16kb": true,
+      "pt_load_segments": [
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        }
+      ],
+      "details": "All PT_LOAD segments meet 16 KB alignment"
+    },
+    {
+      "path": "lib/arm64-v8a/liblitertlm_jni.so",
+      "abi": "arm64-v8a",
+      "machine": 183,
+      "elf_class": "ELF64",
+      "scope": "android_abi",
+      "is_16kb_applicable": true,
+      "machine_matches_abi": true,
+      "is_16kb_compliant": true,
+      "alignment_meets_16kb": true,
+      "pt_load_segments": [
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        }
+      ],
+      "details": "All PT_LOAD segments meet 16 KB alignment"
+    },
+    {
+      "path": "lib/arm64-v8a/libllama-common.so",
+      "abi": "arm64-v8a",
+      "machine": 183,
+      "elf_class": "ELF64",
+      "scope": "android_abi",
+      "is_16kb_applicable": true,
+      "machine_matches_abi": true,
+      "is_16kb_compliant": true,
+      "alignment_meets_16kb": true,
+      "pt_load_segments": [
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        }
+      ],
+      "details": "All PT_LOAD segments meet 16 KB alignment"
+    },
+    {
+      "path": "lib/arm64-v8a/libllama.so",
+      "abi": "arm64-v8a",
+      "machine": 183,
+      "elf_class": "ELF64",
+      "scope": "android_abi",
+      "is_16kb_applicable": true,
+      "machine_matches_abi": true,
+      "is_16kb_compliant": true,
+      "alignment_meets_16kb": true,
+      "pt_load_segments": [
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        }
+      ],
+      "details": "All PT_LOAD segments meet 16 KB alignment"
+    },
+    {
+      "path": "lib/arm64-v8a/libllm.so",
+      "abi": "arm64-v8a",
+      "machine": 183,
+      "elf_class": "ELF64",
+      "scope": "android_abi",
+      "is_16kb_applicable": true,
+      "machine_matches_abi": true,
+      "is_16kb_compliant": true,
+      "alignment_meets_16kb": true,
+      "pt_load_segments": [
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        }
+      ],
+      "details": "All PT_LOAD segments meet 16 KB alignment"
+    },
+    {
+      "path": "lib/arm64-v8a/libmca_mnn_native.so",
+      "abi": "arm64-v8a",
+      "machine": 183,
+      "elf_class": "ELF64",
+      "scope": "android_abi",
+      "is_16kb_applicable": true,
+      "machine_matches_abi": true,
+      "is_16kb_compliant": true,
+      "alignment_meets_16kb": true,
+      "pt_load_segments": [
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        }
+      ],
+      "details": "All PT_LOAD segments meet 16 KB alignment"
+    },
+    {
+      "path": "lib/arm64-v8a/libmca_native.so",
+      "abi": "arm64-v8a",
+      "machine": 183,
+      "elf_class": "ELF64",
+      "scope": "android_abi",
+      "is_16kb_applicable": true,
+      "machine_matches_abi": true,
+      "is_16kb_compliant": true,
+      "alignment_meets_16kb": true,
+      "pt_load_segments": [
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        }
+      ],
+      "details": "All PT_LOAD segments meet 16 KB alignment"
+    },
+    {
+      "path": "lib/arm64-v8a/libmca_prompt_handoff.so",
+      "abi": "arm64-v8a",
+      "machine": 183,
+      "elf_class": "ELF64",
+      "scope": "android_abi",
+      "is_16kb_applicable": true,
+      "machine_matches_abi": true,
+      "is_16kb_compliant": true,
+      "alignment_meets_16kb": true,
+      "pt_load_segments": [
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        }
+      ],
+      "details": "All PT_LOAD segments meet 16 KB alignment"
+    },
+    {
+      "path": "lib/arm64-v8a/libmca_qnn_native.so",
+      "abi": "arm64-v8a",
+      "machine": 183,
+      "elf_class": "ELF64",
+      "scope": "android_abi",
+      "is_16kb_applicable": true,
+      "machine_matches_abi": true,
+      "is_16kb_compliant": true,
+      "alignment_meets_16kb": true,
+      "pt_load_segments": [
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        }
+      ],
+      "details": "All PT_LOAD segments meet 16 KB alignment"
+    },
+    {
+      "path": "lib/arm64-v8a/libmca_sd_native.so",
+      "abi": "arm64-v8a",
+      "machine": 183,
+      "elf_class": "ELF64",
+      "scope": "android_abi",
+      "is_16kb_applicable": true,
+      "machine_matches_abi": true,
+      "is_16kb_compliant": true,
+      "alignment_meets_16kb": true,
+      "pt_load_segments": [
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        }
+      ],
+      "details": "All PT_LOAD segments meet 16 KB alignment"
+    },
+    {
+      "path": "lib/arm64-v8a/libmtmd.so",
+      "abi": "arm64-v8a",
+      "machine": 183,
+      "elf_class": "ELF64",
+      "scope": "android_abi",
+      "is_16kb_applicable": true,
+      "machine_matches_abi": true,
+      "is_16kb_compliant": true,
+      "alignment_meets_16kb": true,
+      "pt_load_segments": [
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        }
+      ],
+      "details": "All PT_LOAD segments meet 16 KB alignment"
+    },
+    {
+      "path": "lib/arm64-v8a/libnpu_jni.so",
+      "abi": "arm64-v8a",
+      "machine": 183,
+      "elf_class": "ELF64",
+      "scope": "android_abi",
+      "is_16kb_applicable": true,
+      "machine_matches_abi": true,
+      "is_16kb_compliant": true,
+      "alignment_meets_16kb": true,
+      "pt_load_segments": [
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        }
+      ],
+      "details": "All PT_LOAD segments meet 16 KB alignment"
+    },
+    {
+      "path": "lib/arm64-v8a/libomp.so",
+      "abi": "arm64-v8a",
+      "machine": 183,
+      "elf_class": "ELF64",
+      "scope": "android_abi",
+      "is_16kb_applicable": true,
+      "machine_matches_abi": true,
+      "is_16kb_compliant": true,
+      "alignment_meets_16kb": true,
+      "pt_load_segments": [
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        },
+        {
+          "p_align": 16384,
+          "congruent": true
+        }
+      ],
+      "details": "All PT_LOAD segments meet 16 KB alignment"
+    }
+  ]
+}

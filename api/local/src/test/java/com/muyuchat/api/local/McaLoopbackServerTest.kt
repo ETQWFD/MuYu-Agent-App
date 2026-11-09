@@ -1,0 +1,3232 @@
+package com.muyuchat.api.local
+
+import com.muyuchat.core.engine.ChatRequest
+import com.muyuchat.core.engine.GenerateEvent
+import com.muyuchat.core.engine.GenerationParams
+import com.muyuchat.core.engine.LocalChatExecutionContext
+import com.muyuchat.core.engine.RuntimeStats
+import kotlinx.coroutines.awaitCancellation
+import kotlinx.coroutines.flow.emptyFlow
+import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.flow.flowOf
+import org.json.JSONArray
+import org.json.JSONObject
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
+import org.junit.Test
+import java.net.ServerSocket
+import java.net.Socket
+import java.security.MessageDigest
+import java.util.Base64
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicReference
+
+class McaLoopbackServerTest {
+    @Test
+    fun capabilityRegistryDescribesProtocolSubsetAndDoesNotExposeDeviceAdmission() {
+        val root = JSONObject(LocalApiCapabilityRegistry.json())
+        assertEquals(LocalApiCapabilityRegistry.SCHEMA, root.getString("schema"))
+        val endpoints = root.getJSONArray("endpoints")
+        val chat = (0 until endpoints.length())
+            .map { endpoints.getJSONObject(it) }
+            .first { it.getString("path") == "/v1/chat/completions" }
+        assertEquals("partial", chat.getString("support"))
+        val fields = chat.getJSONArray("fields")
+        assertTrue((0 until fields.length()).any { fields.optString(it) == "messages" })
+        val notes = chat.getJSONArray("notes")
+        assertTrue((0 until notes.length()).any { notes.optString(it).contains("unsupported fields") })
+        val errors = chat.getJSONArray("error_codes")
+        assertTrue((0 until errors.length()).any { errors.optString(it) == "parameter_scope_conflict" })
+        assertFalse(root.toString().contains("allowlist", ignoreCase = true))
+        assertFalse(root.toString().contains("whitelist", ignoreCase = true))
+        assertFalse(root.toString().contains("chipset", ignoreCase = true))
+    }
+
+    @Test
+    fun authenticatedCapabilityEndpointUsesTheProductionRegistry() {
+        withServer(apiKey = "secret") { port ->
+            val unauthorized = rawHttp(
+                port,
+                "GET ${LocalApiCapabilityRegistry.PATH} HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n"
+            )
+            assertTrue(unauthorized.startsWith("HTTP/1.1 401 Unauthorized"))
+
+            val response = rawHttp(port, authenticatedGet(LocalApiCapabilityRegistry.PATH))
+            assertTrue(response.startsWith("HTTP/1.1 200 OK"))
+            val body = responseJson(response)
+            assertEquals(LocalApiCapabilityRegistry.SCHEMA, body.getString("schema"))
+            assertTrue(body.getJSONArray("endpoints").length() >= 5)
+        }
+    }
+    @Test
+    fun publicModelIdIsReadableStableAndUniqueByInternalId() {
+        assertEquals(
+            "Qwen 3 4B GGUF [model-42]",
+            localApiPublicModelId("  Qwen   3 4B GGUF  ", "model-42")
+        )
+        assertEquals("model-42", localApiPublicModelId(null, "model-42"))
+        assertEquals("Qwen 3 4B", localApiPublicModelId("Qwen 3 4B", "Qwen 3 4B"))
+        assertFalse(
+            localApiPublicModelId("Shared name", "model-a") ==
+                localApiPublicModelId("Shared name", "model-b")
+        )
+    }
+
+    @Test
+    fun staleRuntimeOwnerCannotDetachReplacementProviders() {
+        val firstOwner = Any()
+        val replacementOwner = Any()
+        val replacementCleanupCalls = AtomicInteger(0)
+        try {
+            LocalApiRuntime.claimOwner(firstOwner) {
+                replacementCleanupCalls.incrementAndGet()
+            }
+            LocalApiRuntime.loadedModelJsonProvider = { """{"id":"first"}""" }
+
+            LocalApiRuntime.claimOwner(replacementOwner) {
+                replacementCleanupCalls.incrementAndGet()
+            }
+            LocalApiRuntime.loadedModelJsonProvider = { """{"id":"replacement"}""" }
+
+            assertEquals(1, replacementCleanupCalls.get())
+            assertFalse(LocalApiRuntime.releaseOwner(firstOwner))
+            assertEquals(
+                "replacement",
+                JSONObject(LocalApiRuntime.loadedModelJsonProvider()).getString("id")
+            )
+            assertTrue(LocalApiRuntime.releaseOwner(replacementOwner))
+            assertEquals("{}", LocalApiRuntime.loadedModelJsonProvider())
+        } finally {
+            LocalApiRuntime.releaseOwner(firstOwner)
+            LocalApiRuntime.releaseOwner(replacementOwner)
+            resetLocalApiRuntimeForTests()
+        }
+    }
+
+    @Test
+    fun shutdownClosesAcceptedClientBlockedOnAnIncompleteRequest() {
+        val port = freePort()
+        val server = McaLoopbackServer(port = port, apiKey = "secret")
+        val client = Socket()
+        try {
+            server.start()
+            client.connect(java.net.InetSocketAddress("127.0.0.1", port))
+            client.soTimeout = 2_000
+            client.getOutputStream().write(
+                "GET /v1/models HTTP/1.1\r\nHost: 127.0.0.1\r\n".toByteArray()
+            )
+            client.getOutputStream().flush()
+
+            val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2)
+            while (server.activeClientCountForTests() == 0 && System.nanoTime() < deadline) {
+                Thread.sleep(5L)
+            }
+            assertEquals(1, server.activeClientCountForTests())
+
+            server.shutdown()
+
+            val read = runCatching { client.getInputStream().read() }
+            assertTrue(read.isFailure || read.getOrNull() == -1)
+        } finally {
+            runCatching { client.close() }
+            server.shutdown()
+        }
+    }
+
+    @Test
+    fun nonLoopbackListenerRequiresAuthenticationKey() {
+        val server = McaLoopbackServer(port = freePort(), bindHost = "0.0.0.0", apiKey = "")
+        try {
+            server.start()
+            throw AssertionError("Expected an unauthenticated non-loopback listener to be rejected")
+        } catch (error: IllegalArgumentException) {
+            assertTrue(error.message.orEmpty().contains("requires a non-empty API key"))
+        } finally {
+            server.shutdown()
+        }
+    }
+
+    @Test
+    fun oversizedRequestBodyIsRejectedBeforeProviderExecution() {
+        val calls = AtomicInteger(0)
+        withServer(apiKey = "secret") { port ->
+            LocalApiRuntime.imageGenerationProvider = { _, _ ->
+                calls.incrementAndGet()
+                error("provider must not run")
+            }
+            val request = "POST /v1/images/generations HTTP/1.1\r\n" +
+                "Host: 127.0.0.1\r\n" +
+                "Authorization: Bearer secret\r\n" +
+                "Content-Type: application/json\r\n" +
+                "Content-Length: ${64L * 1024L * 1024L + 1L}\r\n\r\n"
+
+            val response = rawHttp(port, request)
+
+            assertTrue(response.startsWith("HTTP/1.1 413 Payload Too Large"))
+            assertTrue(response.contains("request_body_too_large"))
+            assertEquals(0, calls.get())
+        }
+    }
+
+    @Test
+    fun chatRequestBodyUsesItsOwnBoundBeforeProviderExecution() {
+        val calls = AtomicInteger(0)
+        withServerInstance(apiKey = "secret") { server, port ->
+            LocalApiRuntime.streamChatProvider = {
+                calls.incrementAndGet()
+                error("provider must not run")
+            }
+            val limit = server.requestBodyLimitFor("POST", "/v1/chat/completions")
+            val request = "POST /v1/chat/completions HTTP/1.1\r\n" +
+                "Host: 127.0.0.1\r\n" +
+                "Authorization: Bearer secret\r\n" +
+                "Content-Type: application/json\r\n" +
+                "Content-Length: ${limit + 1}\r\n\r\n"
+
+            val response = rawHttp(port, request)
+
+            assertTrue(response.startsWith("HTTP/1.1 413 Payload Too Large"))
+            assertTrue(response.contains("request_body_too_large"))
+            assertEquals(0, calls.get())
+        }
+    }
+
+    @Test
+    fun imageGenerationKeepsTheOriginalLargerRequestLimit() {
+        val server = McaLoopbackServer(port = freePort(), apiKey = "secret")
+        try {
+            val chatLimit = server.requestBodyLimitFor("POST", "/v1/chat/completions")
+            val responsesLimit = server.requestBodyLimitFor("POST", "/v1/responses")
+            val imageLimit = server.requestBodyLimitFor("POST", "/v1/images/generations")
+
+            assertEquals(64 * 1024 * 1024, imageLimit)
+            assertEquals(chatLimit, responsesLimit)
+            assertTrue(chatLimit < imageLimit)
+            assertTrue(server.requestBodyLimitFor("POST", "/v1/mca/benchmark") < chatLimit)
+        } finally {
+            server.shutdown()
+        }
+    }
+
+    @Test
+    fun unauthenticatedLargeBodyIsRejectedBeforeContentLengthAllocation() {
+        withServer(apiKey = "secret") { port ->
+            val request = "POST /v1/images/generations HTTP/1.1\r\n" +
+                "Host: 127.0.0.1\r\n" +
+                "Content-Type: application/json\r\n" +
+                "Content-Length: ${64L * 1024L * 1024L + 1L}\r\n\r\n"
+
+            val response = rawHttp(port, request)
+
+            assertTrue(response.startsWith("HTTP/1.1 401 Unauthorized"))
+            assertTrue(response.contains("unauthorized"))
+        }
+    }
+
+    @Test
+    fun textualInversionInventoryRequiresAuthenticationAndPublishesOnlySelectionFields() {
+        withServer(apiKey = "secret") { port ->
+            LocalApiRuntime.imageTextualInversionsJsonProvider = {
+                org.json.JSONArray()
+                    .put(
+                        JSONObject()
+                            .put("id", "11111111-1111-4111-8111-111111111111")
+                            .put("name", "Ceramic style")
+                            .put("trigger", "<ceramic_style>")
+                            .put("format", "safetensors")
+                            .put("sha256", "a".repeat(64))
+                            .put("sizeBytes", 4_096L)
+                            .put("importedAt", 12_345L)
+                            .put("path", "D:\\private\\embedding.safetensors")
+                            .put("modelFingerprint", "b".repeat(64))
+                            .put("tokenizerFingerprint", "c".repeat(64))
+                    )
+                    .put(JSONObject().put("id", "not-a-uuid").put("path", "D:\\private\\bad.bin"))
+                    .toString()
+            }
+
+            val unauthorized = rawHttp(
+                port,
+                "GET /v1/images/textual-inversions HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n"
+            )
+            assertTrue(unauthorized.startsWith("HTTP/1.1 401 Unauthorized"))
+
+            val response = rawHttp(port, authenticatedGet("/v1/images/textual-inversions"))
+            val data = responseJson(response).getJSONArray("data")
+            val item = data.getJSONObject(0)
+
+            assertTrue(response.startsWith("HTTP/1.1 200 OK"))
+            assertEquals(1, data.length())
+            assertEquals("textual_inversion", item.getString("object"))
+            assertEquals("11111111-1111-4111-8111-111111111111", item.getString("id"))
+            assertEquals("<ceramic_style>", item.getString("trigger"))
+            assertEquals(4_096L, item.getLong("size_bytes"))
+            assertEquals(12L, item.getLong("created"))
+            assertFalse(response.contains("D:\\private"))
+            assertFalse(response.contains("modelFingerprint"))
+            assertFalse(response.contains("tokenizerFingerprint"))
+            assertFalse(response.contains("b".repeat(64)))
+            assertFalse(response.contains("c".repeat(64)))
+        }
+    }
+
+
+    @Test
+    fun authenticatedImagesApiUsesProductionProviderAndKeepsRequestIdentity() {
+        val capturedRequestId = AtomicReference<String>()
+        val capturedBody = AtomicReference<String>()
+        val body = """{"prompt":"a ceramic cup","size":"512x512","steps":20}"""
+        withServer(apiKey = "secret") { port ->
+            LocalApiRuntime.imageGenerationProvider = { requestId, requestBody ->
+                capturedRequestId.set(requestId)
+                capturedBody.set(requestBody)
+                JSONObject()
+                    .put("created", 1_750_000_000L)
+                    .put("request_id", requestId)
+                    .put("model", "fixture-image-model")
+                    .put("prompt_processing", directPromptProcessing(requestBody))
+                    .put(
+                        "execution",
+                        strictImageExecution(runtime = "STABLE_DIFFUSION_CPP")
+                            .bindPromptExecution(requestBody)
+                    )
+                    .put("data", imageData())
+                    .toString()
+            }
+
+            val response = rawHttp(
+                port,
+                authenticatedPost("/v1/images/generations", body = body)
+            )
+            val responseBody = responseJson(response)
+
+            assertTrue(response.startsWith("HTTP/1.1 200 OK"))
+            assertTrue(capturedRequestId.get().startsWith("img-"))
+            assertEquals(capturedRequestId.get(), responseBody.getString("request_id"))
+            assertEquals("fixture-image-model", responseBody.getString("model"))
+            assertTrue(responseBody.getLong("created") > 0L)
+            assertEquals(body, capturedBody.get())
+        }
+    }
+
+    @Test
+    fun authenticatedStopCancelsTheActiveImagesRequestCoroutine() {
+        val started = CountDownLatch(1)
+        val cancelled = CountDownLatch(1)
+        val stopCalls = AtomicInteger(0)
+        val imageCalls = AtomicInteger(0)
+        withServer(apiKey = "secret") { port ->
+            LocalApiRuntime.imageGenerationProvider = { requestId, requestBody ->
+                if (imageCalls.incrementAndGet() == 1) {
+                    started.countDown()
+                    try {
+                        awaitCancellation()
+                    } finally {
+                        cancelled.countDown()
+                    }
+                }
+                JSONObject()
+                    .put("created", 1_750_000_000L)
+                    .put("request_id", requestId)
+                    .put("model", "fixture-image-model")
+                    .put("prompt_processing", directPromptProcessing(requestBody))
+                    .put(
+                        "execution",
+                        strictImageExecution(runtime = "STABLE_DIFFUSION_CPP")
+                            .bindPromptExecution(requestBody)
+                    )
+                    .put("data", imageData())
+                    .toString()
+            }
+            LocalApiRuntime.stopGenerationProvider = { stopCalls.incrementAndGet() }
+            val requestThread = Thread {
+                runCatching {
+                    rawHttp(
+                        port,
+                        authenticatedPost(
+                            "/v1/images/generations",
+                            body = """{"prompt":"cancel this image"}"""
+                        )
+                    )
+                }
+            }
+            requestThread.start()
+
+            assertTrue(started.await(5, TimeUnit.SECONDS))
+            val stopResponse = rawHttp(port, authenticatedPost("/v1/generate/stop"))
+
+            assertTrue(stopResponse.startsWith("HTTP/1.1 200 OK"))
+            assertTrue(stopResponse.contains("\"stopped\":true"))
+            assertEquals(1, stopCalls.get())
+            assertTrue(cancelled.await(5, TimeUnit.SECONDS))
+            requestThread.join(5_000L)
+            assertFalse(requestThread.isAlive)
+            val nextResponse = rawHttp(
+                port,
+                authenticatedPost(
+                    "/v1/images/generations",
+                    body = """{"prompt":"next image"}"""
+                )
+            )
+            assertTrue(nextResponse.startsWith("HTTP/1.1 200 OK"))
+            assertEquals(2, imageCalls.get())
+        }
+    }
+
+    @Test
+    fun serverStopCancelsTheActiveImagesRequestCoroutine() {
+        val started = CountDownLatch(1)
+        val cancelled = CountDownLatch(1)
+        withServerInstance(apiKey = "secret") { server, port ->
+            LocalApiRuntime.imageGenerationProvider = { _, _ ->
+                started.countDown()
+                try {
+                    awaitCancellation()
+                } finally {
+                    cancelled.countDown()
+                }
+            }
+            val requestThread = Thread {
+                runCatching {
+                    rawHttp(
+                        port,
+                        authenticatedPost(
+                            "/v1/images/generations",
+                            body = """{"prompt":"stop the server"}"""
+                        )
+                    )
+                }
+            }
+            requestThread.start()
+
+            assertTrue(started.await(5, TimeUnit.SECONDS))
+            server.stop()
+
+            assertTrue(cancelled.await(5, TimeUnit.SECONDS))
+            requestThread.join(5_000L)
+            assertFalse(requestThread.isAlive)
+        }
+    }
+
+    @Test
+    fun resetImagesClientDisconnectCancelsTheProviderCoroutine() {
+        val started = CountDownLatch(1)
+        val cancelled = CountDownLatch(1)
+        withServer(apiKey = "secret") { port ->
+            LocalApiRuntime.imageGenerationProvider = { _, _ ->
+                started.countDown()
+                try {
+                    awaitCancellation()
+                } finally {
+                    cancelled.countDown()
+                }
+            }
+            val socket = Socket("127.0.0.1", port)
+            try {
+                socket.setSoLinger(true, 0)
+                socket.getOutputStream().run {
+                    write(
+                        authenticatedPost(
+                            "/v1/images/generations",
+                            body = """{"prompt":"disconnect"}"""
+                        ).toByteArray(Charsets.UTF_8)
+                    )
+                    flush()
+                }
+
+                assertTrue(started.await(5, TimeUnit.SECONDS))
+                socket.close()
+
+                assertTrue(cancelled.await(5, TimeUnit.SECONDS))
+            } finally {
+                runCatching { socket.close() }
+            }
+        }
+    }
+
+    @Test
+    fun authenticatedImagesApiRejectsRetiredLocalTranslationEvidence() {
+        val sourcePrompt = "一只红色杯子放在蓝色桌子上，杯子左侧有两个绿色苹果"
+        val effectivePrompt =
+            "one red cup on a blue table, two green apples to the left of the cup"
+        val translationPlanSha256 = "d".repeat(64)
+        val verificationReceiptSha256 = "e".repeat(64)
+        val translationPhaseSystemPromptSha256 = "f".repeat(64)
+        val verificationPhaseSystemPromptSha256 = "1".repeat(64)
+        val translatorRuntime = "LLAMA_CPP"
+        val translatorModelSha256 = "b".repeat(64)
+        val promptLanguageBindingFingerprint = "c".repeat(64)
+        val translationProofFingerprint = imagePromptTranslationProofFingerprint(
+            contractVersion = 4,
+            originalPrompt = sourcePrompt,
+            effectivePrompt = effectivePrompt,
+            originalNegativePrompt = null,
+            effectiveNegativePrompt = "",
+            negativePromptSource = "EMPTY",
+            translationPlanSha256 = translationPlanSha256,
+            verificationReceiptSha256 = verificationReceiptSha256,
+            translationPhaseSystemPromptSha256 = translationPhaseSystemPromptSha256,
+            verificationPhaseSystemPromptSha256 = verificationPhaseSystemPromptSha256,
+            translatorRuntime = translatorRuntime,
+            translatorModelSha256 = translatorModelSha256,
+            promptLanguageBindingFingerprint = promptLanguageBindingFingerprint
+        )
+        withServer(apiKey = "secret") { port ->
+            LocalApiRuntime.imageGenerationProvider = { requestId, requestBody ->
+                JSONObject()
+                    .put("created", 1_750_000_000L)
+                    .put("request_id", requestId)
+                    .put("model", "fixture-image-model")
+                    .put(
+                        "prompt_processing",
+                        JSONObject()
+                            .put("version", 4)
+                            .put("originalPrompt", sourcePrompt)
+                            .put("effectivePrompt", effectivePrompt)
+                            .put("originalNegativePrompt", JSONObject.NULL)
+                            .put("effectiveNegativePrompt", "")
+                            .put("negativePromptSource", "EMPTY")
+                            .put("method", "LOCAL_LLM_ZH_TO_EN")
+                            .put("translationContractVersion", 4)
+                            .put("imageProfileBindingFingerprint", "a".repeat(64))
+                            .put(
+                                "promptLanguageBindingFingerprint",
+                                promptLanguageBindingFingerprint
+                            )
+                            .put("translatorModelId", "translator-model")
+                            .put("translatorModelName", "Translator Model")
+                            .put("translatorRuntime", translatorRuntime)
+                            .put("translatorModelSha256", translatorModelSha256)
+                            .put("translationPlanSha256", translationPlanSha256)
+                            .put("verificationReceiptSha256", verificationReceiptSha256)
+                            .put(
+                                "translationPhaseSystemPromptSha256",
+                                translationPhaseSystemPromptSha256
+                            )
+                            .put(
+                                "verificationPhaseSystemPromptSha256",
+                                verificationPhaseSystemPromptSha256
+                            )
+                            .put("translationProofFingerprint", translationProofFingerprint)
+                    )
+                    .put(
+                        "execution",
+                        strictImageExecution(runtime = "STABLE_DIFFUSION_CPP")
+                            .bindPromptExecution(
+                                requestBody = requestBody,
+                                effectivePrompt = effectivePrompt,
+                                effectiveNegativePrompt = null
+                            )
+                    )
+                    .put("data", imageData())
+                    .toString()
+            }
+
+            val response = rawHttp(
+                port,
+                authenticatedPost(
+                    "/v1/images/generations",
+                    body = JSONObject().put("prompt", sourcePrompt).toString()
+                )
+            )
+            assertTrue(response, response.startsWith("HTTP/1.1 502 Bad Gateway"))
+            assertTrue(response, response.contains("unsupported_legacy_prompt_processing_method"))
+        }
+    }
+
+    @Test
+    fun bothAuthenticatedImagesRoutesPreserveRequestedControlsAndExecutionEvidence() {
+        val capturedBodies = mutableListOf<JSONObject>()
+        val body = JSONObject()
+            .put("model", "image-model")
+            .put("prompt", "a ceramic robot")
+            .put("negative_prompt", "blur, low detail")
+            .put("size", "512x512")
+            .put("n", 1)
+            .put("response_format", "b64_json")
+            .put("seed", 20260717)
+            .put("steps", 20)
+            .put("cfg_scale", 7.0)
+            .put("sampler", "dpmpp_2m")
+            .toString()
+
+        withServer(apiKey = "secret") { port ->
+            LocalApiRuntime.imageGenerationProvider = { requestId, requestBody ->
+                capturedBodies += JSONObject(requestBody)
+                JSONObject()
+                    .put("created", 1_750_000_000L)
+                    .put("request_id", requestId)
+                    .put("model", "image-model")
+                    .put("prompt_processing", directPromptProcessing(requestBody))
+                    .put(
+                        "execution",
+                        strictImageExecution(runtime = "QNN_HTP")
+                            .bindPromptExecution(requestBody)
+                    )
+                    .put("data", imageData())
+                    .toString()
+            }
+
+            listOf("/v1/images/generations", "/images/generations").forEach { path ->
+                val response = rawHttp(port, authenticatedPost(path, body = body))
+                val responseBody = responseJson(response)
+                val execution = responseBody.getJSONObject("execution")
+
+                assertTrue(response.startsWith("HTTP/1.1 200 OK"))
+                assertTrue(responseBody.getString("request_id").startsWith("img-"))
+                assertEquals("dpmpp_2m", execution.getString("scheduler"))
+                assertEquals(20, execution.getInt("steps"))
+                assertEquals(7.0, execution.getDouble("cfgScale"), 0.0)
+                assertEquals(20260717, execution.getInt("seed"))
+                assertTrue(execution.getBoolean("nativeExecution"))
+                assertTrue(execution.getBoolean("qnnGraphExecution"))
+                assertFalse(execution.getBoolean("fallback"))
+            }
+
+            assertEquals(2, capturedBodies.size)
+            capturedBodies.forEach { captured ->
+                assertEquals("blur, low detail", captured.getString("negative_prompt"))
+                assertEquals("dpmpp_2m", captured.getString("sampler"))
+                assertEquals("512x512", captured.getString("size"))
+                assertEquals(20, captured.getInt("steps"))
+                assertEquals(7.0, captured.getDouble("cfg_scale"), 0.0)
+                assertEquals(20260717, captured.getInt("seed"))
+            }
+        }
+    }
+
+    @Test
+    fun imagesApiPreservesExplicitEmptyNegativePromptForTheProductionProvider() {
+        val captured = AtomicReference<JSONObject>()
+        withServer(apiKey = "secret") { port ->
+            LocalApiRuntime.imageGenerationProvider = { requestId, requestBody ->
+                captured.set(JSONObject(requestBody))
+                JSONObject()
+                    .put("created", 1_750_000_000L)
+                    .put("request_id", requestId)
+                    .put("model", "fixture-image-model")
+                    .put("prompt_processing", directPromptProcessing(requestBody))
+                    .put(
+                        "execution",
+                        strictImageExecution(runtime = "STABLE_DIFFUSION_CPP")
+                            .bindPromptExecution(requestBody)
+                    )
+                    .put("data", imageData())
+                    .toString()
+            }
+
+            val response = rawHttp(
+                port,
+                authenticatedPost(
+                    "/v1/images/generations",
+                    body = """{"prompt":"disable defaults","negative_prompt":""}"""
+                )
+            )
+
+            assertTrue(response.startsWith("HTTP/1.1 200 OK"))
+            assertTrue(captured.get().has("negative_prompt"))
+            assertEquals("", captured.get().getString("negative_prompt"))
+        }
+    }
+
+    @Test
+    fun imagesApiPreservesStructuredWorkerFailureStatusAndCode() {
+        withServer(apiKey = "secret") { port ->
+            LocalApiRuntime.imageGenerationProvider = { _, _ ->
+                throw ImageGenerationProviderException.fromWorkerFailure(
+                    code = "unsupported_preview",
+                    message = "Preview publication is not available."
+                )
+            }
+
+            val response = rawHttp(
+                port,
+                authenticatedPost(
+                    "/images/generations",
+                    body = """{"prompt":"preview"}"""
+                )
+            )
+
+            assertTrue(response, response.startsWith("HTTP/1.1 422 Unprocessable Entity"))
+            assertTrue(response.contains("unsupported_preview"))
+            assertFalse(response.contains("image_generation_failed"))
+        }
+    }
+
+    @Test
+    fun imagesApiMapsLegacyMissingModelFailureToActionableUnavailableError() {
+        withServer(apiKey = "secret") { port ->
+            LocalApiRuntime.imageGenerationProvider = { _, _ ->
+                throw IllegalStateException("No configured local image model is selected.")
+            }
+
+            val response = rawHttp(
+                port,
+                authenticatedPost(
+                    "/v1/images/generations",
+                    body = """{"prompt":"a ceramic cup"}"""
+                )
+            )
+
+            assertTrue(response.startsWith("HTTP/1.1 503 Service Unavailable"))
+            assertTrue(response.contains("image_runtime_unavailable"))
+            assertTrue(response.contains("Load a complete image model"))
+        }
+    }
+
+    @Test
+    fun imagesApiMapsLegacyMissingBundleFailureToModelNotReadyError() {
+        withServer(apiKey = "secret") { port ->
+            LocalApiRuntime.imageGenerationProvider = { _, _ ->
+                throw IllegalStateException(
+                    "QNN image smoke contextBinary is missing from bundle: unet.bin"
+                )
+            }
+
+            val response = rawHttp(
+                port,
+                authenticatedPost(
+                    "/v1/images/generations",
+                    body = """{"prompt":"a ceramic cup"}"""
+                )
+            )
+
+            assertTrue(response.startsWith("HTTP/1.1 409 Conflict"))
+            assertTrue(response.contains("image_model_not_ready"))
+            assertTrue(response.contains("Re-download or re-import"))
+        }
+    }
+
+    @Test
+    fun authenticatedImagesApiAcceptsStrictQnnControlEvidenceWithoutPrivatePaths() {
+        withServer(apiKey = "secret") { port ->
+            LocalApiRuntime.imageGenerationProvider = { requestId, requestBody ->
+                JSONObject()
+                    .put("created", 1_750_000_000L)
+                    .put("request_id", requestId)
+                    .put("model", "fixture-image-model")
+                    .put("prompt_processing", directPromptProcessing(requestBody))
+                    .put("execution", strictControlImageExecution().bindPromptExecution(requestBody))
+                    .put("data", imageData())
+                    .toString()
+            }
+
+            val response = rawHttp(
+                port,
+                authenticatedPost(
+                    "/v1/images/generations",
+                    body = """{"prompt":"edges","task_mode":"control","control_image":"data:image/png;base64,AAAA","control_strength":0.8}"""
+                )
+            )
+            val execution = responseJson(response).getJSONObject("execution")
+
+            assertTrue(response.startsWith("HTTP/1.1 200 OK"))
+            assertTrue(execution.getBoolean("npuActive"))
+            assertEquals(1, execution.getJSONObject("imageInput").getInt("controlImageExecutionCount"))
+            assertEquals(
+                "b".repeat(64),
+                execution.getJSONObject("nativeEffective").getString("controlImageSha256")
+            )
+            assertFalse(response.contains("controlImagePath"))
+            assertFalse(response.contains("/data/user/0/"))
+        }
+    }
+
+    @Test
+    fun imagesApiRejectsOutOfRangeCountBeforeInvokingProvider() {
+        val calls = AtomicInteger(0)
+        withServer(apiKey = "secret") { port ->
+            LocalApiRuntime.imageGenerationProvider = { _, _ ->
+                calls.incrementAndGet()
+                "{}"
+            }
+
+            val response = rawHttp(
+                port,
+                authenticatedPost(
+                    "/v1/images/generations",
+                    body = """{"prompt":"too many images","n":9}"""
+                )
+            )
+
+            assertTrue(response.startsWith("HTTP/1.1 400 Bad Request"))
+            assertTrue(response.contains("unsupported_image_count"))
+            assertEquals(0, calls.get())
+        }
+    }
+
+    @Test
+    fun imagesApiReturnsDedicatedBusyConflictWithoutInvokingProvider() {
+        val calls = AtomicInteger(0)
+        withServer(apiKey = "secret") { port ->
+            LocalApiRuntime.imageGenerationProvider = { _, _ ->
+                calls.incrementAndGet()
+                "{}"
+            }
+            LocalApiRuntime.controlPlane = object : LocalApiControlPlane {
+                override fun busyState(): LocalApiBusyState = LocalApiBusyState(
+                    busy = true,
+                    code = "generation_in_progress",
+                    message = "A generation is already active.",
+                    retryAfterMs = 1500L
+                )
+            }
+
+            val response = rawHttp(
+                port,
+                authenticatedPost(
+                    "/images/generations",
+                    body = """{"prompt":"wait for the active request"}"""
+                )
+            )
+
+            assertTrue(response.startsWith("HTTP/1.1 409 Conflict"))
+            assertTrue(response.contains("image_generation_busy"))
+            assertTrue(response.contains("X-Retry-After-Ms: 1500"))
+            assertEquals(0, calls.get())
+        }
+    }
+
+    @Test
+    fun imagesApiRejectsProviderResponseWithMismatchedIdentity() {
+        withServer(apiKey = "secret") { port ->
+            LocalApiRuntime.imageGenerationProvider = { _, _ ->
+                JSONObject()
+                    .put("request_id", "img-wrong")
+                    .put("execution", JSONObject())
+                    .put("data", org.json.JSONArray())
+                    .toString()
+            }
+
+            val response = rawHttp(
+                port,
+                authenticatedPost(
+                    "/v1/images/generations",
+                    body = """{"prompt":"identity check"}"""
+                )
+            )
+
+            assertTrue(response.startsWith("HTTP/1.1 502 Bad Gateway"))
+            assertTrue(response.contains("image_request_identity_mismatch"))
+        }
+    }
+
+    @Test
+    fun imagesApiRejectsProviderThatSilentlySwitchesTheRequestedModel() {
+        withServer(apiKey = "secret") { port ->
+            LocalApiRuntime.imageGenerationProvider = { requestId, requestBody ->
+                JSONObject()
+                    .put("request_id", requestId)
+                    .put("model", "different-model")
+                    .put("prompt_processing", directPromptProcessing(requestBody))
+                    .put(
+                        "execution",
+                        strictImageExecution("STABLE_DIFFUSION_CPP")
+                            .bindPromptExecution(requestBody)
+                    )
+                    .put("data", imageData())
+                    .toString()
+            }
+
+            val response = rawHttp(
+                port,
+                authenticatedPost(
+                    "/v1/images/generations",
+                    body = """{"model":"requested-model","prompt":"identity check"}"""
+                )
+            )
+
+            assertTrue(response.startsWith("HTTP/1.1 502 Bad Gateway"))
+            assertTrue(response, response.contains("image_model_identity_mismatch"))
+        }
+    }
+
+    @Test
+    fun imagesApiRequiresAuthenticationBeforeInvokingProvider() {
+        val calls = AtomicInteger(0)
+        val body = """{"prompt":"private prompt"}"""
+        withServer(apiKey = "secret") { port ->
+            LocalApiRuntime.imageGenerationProvider = { _, _ ->
+                calls.incrementAndGet()
+                "{}"
+            }
+
+            val response = rawHttp(
+                port,
+                "POST /v1/images/generations HTTP/1.1\r\n" +
+                    "Host: 127.0.0.1\r\n" +
+                    "Content-Type: application/json\r\n" +
+                    "Content-Length: ${body.toByteArray(Charsets.UTF_8).size}\r\n\r\n" +
+                    body
+            )
+
+            assertTrue(response.startsWith("HTTP/1.1 401 Unauthorized"))
+            assertEquals(0, calls.get())
+            assertFalse(response.contains("private prompt"))
+        }
+    }
+
+    @Test
+    fun idleRuntimeStateDoesNotClaimThatTheRuntimeIsBusy() {
+        withServer(apiKey = "secret") { port ->
+            val runtime = responseJson(rawHttp(port, authenticatedGet("/v1/mca/runtime")))
+
+            assertFalse(runtime.getBoolean("busy"))
+            assertEquals("idle", runtime.getString("code"))
+            assertEquals("", runtime.getString("message"))
+            assertEquals(0L, runtime.getLong("retry_after_ms"))
+        }
+    }
+
+    @Test
+    fun nonStreamingResponseIdIsPassedToContextAwareEngineProvider() {
+        val capturedRequestId = AtomicReference<String>()
+        withServer(apiKey = "secret") { port ->
+            LocalApiRuntime.streamChatWithContextProvider = { _, context ->
+                capturedRequestId.set(context.requestId)
+                flowOf(
+                    GenerateEvent.Chunk(text = "trace ok", stats = RuntimeStats(completionTokens = 1)),
+                    GenerateEvent.Done(RuntimeStats(completionTokens = 1))
+                )
+            }
+
+            val body = """{"model":"active-model","messages":[{"role":"user","content":"hi"}],"stream":false}"""
+            val response = rawHttp(port, chatRequest(body))
+            val responseId = Regex("\\\"id\\\":\\\"(chatcmpl-[A-Za-z0-9]+)\\\"")
+                .find(response)
+                ?.groupValues
+                ?.get(1)
+
+            assertTrue(response.startsWith("HTTP/1.1 200 OK"))
+            assertEquals(responseId, capturedRequestId.get())
+            assertTrue(response.contains("\"requestId\":\"$responseId\""))
+
+            val runtime = rawHttp(port, authenticatedGet("/v1/mca/runtime"))
+            assertTrue(runtime.contains("\"requestId\":\"$responseId\""))
+            assertFalse(runtime.contains("secret"))
+            assertFalse(runtime.contains("\"content\":\"hi\""))
+        }
+    }
+
+    @Test
+    fun streamingResponseIdIsPassedToContextAwareEngineProvider() {
+        val capturedRequestId = AtomicReference<String>()
+        withServer(apiKey = "secret") { port ->
+            LocalApiRuntime.streamChatWithContextProvider = { _, context ->
+                capturedRequestId.set(context.requestId)
+                flowOf(
+                    GenerateEvent.Chunk(text = "stream trace ok", stats = RuntimeStats(completionTokens = 1)),
+                    GenerateEvent.Done(RuntimeStats(completionTokens = 1))
+                )
+            }
+
+            val body = """{"model":"active-model","messages":[{"role":"user","content":"hi"}],"stream":true}"""
+            val response = rawHttp(port, chatRequest(body))
+            val responseId = Regex("\\\"id\\\":\\\"(chatcmpl-[A-Za-z0-9]+)\\\"")
+                .find(response)
+                ?.groupValues
+                ?.get(1)
+
+            assertTrue(response.startsWith("HTTP/1.1 200 OK"))
+            assertEquals(responseId, capturedRequestId.get())
+            assertTrue(response.contains("data: [DONE]"))
+            assertTrue(response.contains("\"requestId\":\"$responseId\""))
+        }
+    }
+
+    @Test
+    fun productVisionTracePublishesOnlyRequestBoundRedactedMediaEvidence() {
+        val imageSha256 = "a".repeat(64)
+        withServer(apiKey = "secret") { port ->
+            LocalApiRuntime.streamChatWithContextProvider = { _, context ->
+                requireNotNull(context.visionDiagnosticSink).invoke(
+                    "local_vision_input_prepared",
+                    JSONObject()
+                        .put("inputSha256", imageSha256.uppercase())
+                        .put("preprocessing", "passthrough")
+                        .put("nativeReadablePath", "D:\\private\\vision.png")
+                        .put("prompt", "private-prompt-sentinel")
+                        .put("apiKey", "private-token-sentinel")
+                )
+                flowOf(
+                    GenerateEvent.Chunk(text = "vision trace ok", stats = RuntimeStats(completionTokens = 1)),
+                    GenerateEvent.Done(RuntimeStats(completionTokens = 1))
+                )
+            }
+
+            val response = rawHttp(port, chatRequest(imageChatBody(stream = false)))
+            val completionJson = responseJson(response)
+            val runtimeResponse = rawHttp(port, authenticatedGet("/v1/mca/runtime"))
+            val metricsResponse = rawHttp(port, authenticatedGet("/metrics"))
+            val runtime = responseJson(runtimeResponse)
+            val metrics = responseJson(metricsResponse)
+            val runtimeTrace = runtime.getJSONObject("trace")
+            val metricsTrace = metrics.getJSONObject("requestTrace")
+            val mediaTrace = runtimeTrace.getJSONObject("mediaTrace")
+
+            assertTrue(completionJson.getString("id").startsWith("chatcmpl-"))
+            assertEquals(completionJson.getString("id"), runtimeTrace.getString("requestId"))
+            assertEquals(runtimeTrace.toString(), metricsTrace.toString())
+            assertEquals(imageSha256, runtimeTrace.getString("apiImageSha256"))
+            assertEquals(imageSha256, metrics.getString("apiImageSha256"))
+            assertEquals(mediaTrace.toString(), metrics.getJSONObject("mediaTrace").toString())
+            assertEquals(1, mediaTrace.getInt("schemaVersion"))
+            assertEquals(1, mediaTrace.getInt("preparedCount"))
+            assertEquals(0, mediaTrace.getInt("failedCount"))
+            assertEquals(1, mediaTrace.getInt("preprocessingCount"))
+            assertEquals(1, mediaTrace.getJSONObject("preprocessingCounts").getInt("passthrough"))
+            assertEquals(imageSha256, mediaTrace.getString("inputSha256"))
+            assertEquals(imageSha256, mediaTrace.getJSONArray("inputSha256s").getString(0))
+            assertFalse(runtimeResponse.contains("private-prompt-sentinel"))
+            assertFalse(runtimeResponse.contains("private-token-sentinel"))
+            assertFalse(runtimeResponse.contains("vision.png"))
+            assertFalse(metricsResponse.contains("private-prompt-sentinel"))
+            assertFalse(metricsResponse.contains("private-token-sentinel"))
+            assertFalse(metricsResponse.contains("vision.png"))
+        }
+    }
+
+    @Test
+    fun mediaTraceResetsForTheNextRequestAndRejectsStaleDiagnostics() {
+        val firstContext = AtomicReference<LocalChatExecutionContext>()
+        val secondContext = AtomicReference<LocalChatExecutionContext>()
+        val firstSha256 = "b".repeat(64)
+        val staleSha256 = "c".repeat(64)
+        withServer(apiKey = "secret") {
+            var callCount = 0
+            LocalApiRuntime.streamChatWithContextProvider = { _, context ->
+                callCount += 1
+                if (callCount == 1) firstContext.set(context) else secondContext.set(context)
+                flowOf(GenerateEvent.Done(RuntimeStats()))
+            }
+
+            LocalApiRuntime.streamChat(
+                ChatRequest(emptyList()),
+                LocalChatExecutionContext(
+                    requestId = "ui-first",
+                    visionDiagnosticSink = { _, _ -> error("caller sink failure must be isolated") }
+                )
+            )
+            requireNotNull(firstContext.get().visionDiagnosticSink).invoke(
+                "local_vision_input_prepared",
+                JSONObject()
+                    .put("inputSha256", firstSha256)
+                    .put("preprocessing", "passthrough")
+            )
+            val firstTrace = JSONObject(LocalApiRuntime.traceJson())
+            assertEquals(firstSha256, firstTrace.getString("uiImageSha256"))
+
+            LocalApiRuntime.streamChat(
+                ChatRequest(emptyList()),
+                LocalChatExecutionContext(requestId = "ui-second")
+            )
+            requireNotNull(firstContext.get().visionDiagnosticSink).invoke(
+                "local_vision_input_prepared",
+                JSONObject()
+                    .put("inputSha256", staleSha256)
+                    .put("preprocessing", "passthrough")
+            )
+            requireNotNull(secondContext.get().visionDiagnosticSink).invoke(
+                "local_vision_input_prepare_failed",
+                JSONObject()
+                    .put("inputSha256", staleSha256)
+                    .put("preprocessing", "not_started")
+                    .put("error", "D:\\private\\failure")
+            )
+
+            val secondTrace = JSONObject(LocalApiRuntime.traceJson())
+            val secondMedia = secondTrace.getJSONObject("mediaTrace")
+            assertEquals("ui-second", secondTrace.getString("requestId"))
+            assertFalse(secondTrace.has("uiImageSha256"))
+            assertEquals(0, secondMedia.getInt("preparedCount"))
+            assertEquals(1, secondMedia.getInt("failedCount"))
+            assertEquals(1, secondMedia.getInt("preprocessingCount"))
+            assertEquals(1, secondMedia.getJSONObject("preprocessingCounts").getInt("not_started"))
+            assertEquals(0, secondMedia.getJSONArray("inputSha256s").length())
+            assertFalse(secondTrace.toString().contains("private"))
+            assertFalse(secondTrace.toString().contains(staleSha256))
+
+            LocalApiRuntime.clearRequestTrace()
+            assertEquals(0, JSONObject(LocalApiRuntime.traceJson()).length())
+        }
+    }
+
+    @Test
+    fun multipleMediaDiagnosticsAggregateWithoutSingleImageAlias() {
+        val firstSha256 = "d".repeat(64)
+        val secondSha256 = "e".repeat(64)
+        withServer(apiKey = "secret") {
+            LocalApiRuntime.streamChatWithContextProvider = { _, context ->
+                val sink = requireNotNull(context.visionDiagnosticSink)
+                sink.invoke(
+                    "local_vision_input_prepared",
+                    JSONObject()
+                        .put("inputSha256", firstSha256)
+                        .put("preprocessing", "passthrough")
+                )
+                sink.invoke(
+                    "local_vision_input_prepared",
+                    JSONObject()
+                        .put("inputSha256", secondSha256)
+                        .put("preprocessing", "passthrough")
+                )
+                flowOf(GenerateEvent.Done(RuntimeStats()))
+            }
+
+            LocalApiRuntime.streamChat(
+                ChatRequest(emptyList()),
+                LocalChatExecutionContext(requestId = "ui-multi-image")
+            )
+
+            val trace = JSONObject(LocalApiRuntime.traceJson())
+            val media = trace.getJSONObject("mediaTrace")
+            val hashes = media.getJSONArray("inputSha256s")
+            assertEquals(2, media.getInt("preparedCount"))
+            assertEquals(0, media.getInt("failedCount"))
+            assertEquals(2, media.getInt("preprocessingCount"))
+            assertEquals(2, media.getJSONObject("preprocessingCounts").getInt("passthrough"))
+            assertEquals(2, hashes.length())
+            assertEquals(firstSha256, hashes.getString(0))
+            assertEquals(secondSha256, hashes.getString(1))
+            assertFalse(media.has("inputSha256"))
+            assertFalse(trace.has("uiImageSha256"))
+            assertFalse(trace.has("apiImageSha256"))
+        }
+    }
+
+    @Test
+    fun preflightAlwaysReturnsCorsHeaders() {
+        withServer(apiKey = "secret") { port ->
+            val response = rawHttp(
+                port,
+                "OPTIONS /v1/chat/completions HTTP/1.1\r\nHost: 127.0.0.1\r\nOrigin: http://localhost\r\n\r\n"
+            )
+
+            assertTrue(response.startsWith("HTTP/1.1 204 No Content"))
+            assertTrue(response.contains("Access-Control-Allow-Origin: *"))
+            assertTrue(response.contains("Access-Control-Allow-Private-Network: true"))
+        }
+    }
+
+    @Test
+    fun healthAndWebPageDoNotRequireApiKey() {
+        withServer(apiKey = "secret") { port ->
+            val health = rawHttp(port, "GET /health HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
+            val page = rawHttp(port, "GET / HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
+
+            assertTrue(health.startsWith("HTTP/1.1 200 OK"))
+            assertTrue(health.contains("MuYu Chat Agent"))
+            assertTrue(page.startsWith("HTTP/1.1 200 OK"))
+            assertTrue(page.contains("MCA Web Chat"))
+            assertTrue(page.contains("id=\"imageInput\""))
+            assertTrue(page.contains("image_url"))
+        }
+    }
+
+    @Test
+    fun protectedRoutesReturnOpenAiStyleErrorJsonWithoutKey() {
+        withServer(apiKey = "secret") { port ->
+            val response = rawHttp(port, "GET /metrics HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
+
+            assertTrue(response.startsWith("HTTP/1.1 401 Unauthorized"))
+            assertTrue(response.contains("\"type\":\"mca_error\""))
+            assertTrue(response.contains("\"code\":\"unauthorized\""))
+        }
+    }
+
+    @Test
+    fun modelsRouteDoesNotRequireApiKey() {
+        withServer(apiKey = "secret") { port ->
+            LocalApiRuntime.modelsJsonProvider = {
+                """{"object":"list","data":[{"id":"local-vl","object":"model","owned_by":"local","vision_ready":true,"vision_projector":"mmproj-local-vl.gguf"}]}"""
+            }
+            val response = rawHttp(
+                port,
+                "GET /v1/models HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n"
+            )
+
+            assertTrue(response.startsWith("HTTP/1.1 200 OK"))
+            assertTrue(response.contains("\"object\":\"list\""))
+            assertTrue(response.contains("\"vision_ready\":true"))
+            assertTrue(response.contains("\"vision_projector\":\"mmproj-local-vl.gguf\""))
+        }
+    }
+
+    @Test
+    fun modelsRoutePublishesCompatibleNameAliasesFromProviderDisplayName() {
+        withServer(apiKey = "secret") { port ->
+            // MainViewModel publishes display_name from ModelManifest.displayName. Exercise the
+            // complete loopback boundary to ensure aliases survive publicCopy sanitization.
+            LocalApiRuntime.modelsJsonProvider = {
+                """{"object":"list","data":[
+                    {"id":"model-42","display_name":"Qwen 3 4B GGUF","runtime":"llama_cpp"},
+                    {"id":"model-43","displayName":"通义千问 3 4B MNN","runtime":"mnn"},
+                    {"id":"opaque-44","runtime":"llama_cpp"}
+                ]}"""
+            }
+
+            val response = rawHttp(port, authenticatedGet("/v1/models"))
+            val data = responseJson(response).getJSONArray("data")
+            val first = data.getJSONObject(0)
+            val second = data.getJSONObject(1)
+            val unnamed = data.getJSONObject(2)
+
+            assertTrue(response.startsWith("HTTP/1.1 200 OK"))
+            assertEquals("Qwen 3 4B GGUF [model-42]", first.getString("id"))
+            assertEquals("model-42", first.getString("internal_id"))
+            assertTrue(first.getJSONArray("aliases").toString().contains("model-42"))
+            assertEquals("Qwen 3 4B GGUF", first.getString("name"))
+            assertEquals("Qwen 3 4B GGUF", first.getString("display_name"))
+            assertEquals("Qwen 3 4B GGUF", first.getString("displayName"))
+            assertEquals("通义千问 3 4B MNN [model-43]", second.getString("id"))
+            assertEquals("model-43", second.getString("internal_id"))
+            assertEquals("通义千问 3 4B MNN", second.getString("name"))
+            assertEquals("通义千问 3 4B MNN", second.getString("display_name"))
+            assertEquals("通义千问 3 4B MNN", second.getString("displayName"))
+            // An opaque id is never presented as a fabricated human-readable model name.
+            assertEquals("opaque-44", unnamed.getString("id"))
+            assertEquals("opaque-44", unnamed.getString("internal_id"))
+            assertFalse(unnamed.has("name"))
+            assertFalse(unnamed.has("display_name"))
+            assertFalse(unnamed.has("displayName"))
+        }
+    }
+
+    @Test
+    fun concurrentChatRequestsUseOneExactGenerationLease() {
+        val firstStarted = CountDownLatch(1)
+        val releaseFirst = CountDownLatch(1)
+        val providerCalls = AtomicInteger(0)
+        val firstResponse = AtomicReference<String>()
+        withServer(apiKey = "secret") { port ->
+            LocalApiRuntime.streamChatProvider = {
+                val call = providerCalls.incrementAndGet()
+                flow {
+                    if (call == 1) {
+                        firstStarted.countDown()
+                        check(releaseFirst.await(5, TimeUnit.SECONDS))
+                    }
+                    emit(GenerateEvent.Chunk("answer-$call", RuntimeStats(completionTokens = 1)))
+                    emit(GenerateEvent.Done(RuntimeStats(completionTokens = 1)))
+                }
+            }
+            val request = chatRequest(
+                """{"model":"active-model","messages":[{"role":"user","content":"hi"}],"stream":true}"""
+            )
+            val firstClient = Thread {
+                firstResponse.set(rawHttp(port, request))
+            }.apply { start() }
+
+            assertTrue(firstStarted.await(2, TimeUnit.SECONDS))
+            val rejected = rawHttp(port, request)
+            assertTrue(rejected.startsWith("HTTP/1.1 409 Conflict"))
+            assertTrue(rejected.contains("\"code\":\"generation_in_progress\""))
+            assertFalse(rejected.contains("Content-Type: text/event-stream"))
+            assertEquals(1, providerCalls.get())
+
+            releaseFirst.countDown()
+            firstClient.join(3_000L)
+            assertFalse(firstClient.isAlive)
+            assertTrue(firstResponse.get().startsWith("HTTP/1.1 200 OK"))
+            assertTrue(firstResponse.get().contains("data: [DONE]"))
+
+            val afterRelease = rawHttp(port, request)
+            assertTrue(afterRelease.startsWith("HTTP/1.1 200 OK"))
+            assertTrue(afterRelease.contains("answer-2"))
+            assertEquals(2, providerCalls.get())
+        }
+    }
+
+    @Test
+    fun disconnectedStreamingChatStopsGenerationAndReleasesTheExactLease() {
+        val firstStarted = CountDownLatch(1)
+        val firstCancelled = CountDownLatch(1)
+        val providerCalls = AtomicInteger(0)
+        withServer(apiKey = "secret") { port ->
+            LocalApiRuntime.streamChatProvider = {
+                when (providerCalls.incrementAndGet()) {
+                    1 -> flow {
+                        try {
+                            emit(
+                                GenerateEvent.Chunk(
+                                    text = "disconnect-ready",
+                                    stats = RuntimeStats(completionTokens = 1)
+                                )
+                            )
+                            firstStarted.countDown()
+                            awaitCancellation()
+                        } finally {
+                            firstCancelled.countDown()
+                        }
+                    }
+                    else -> flowOf(
+                        GenerateEvent.Chunk(
+                            text = "recovered",
+                            stats = RuntimeStats(completionTokens = 1)
+                        ),
+                        GenerateEvent.Done(RuntimeStats(completionTokens = 1))
+                    )
+                }
+            }
+
+            val disconnectedClient = Socket("127.0.0.1", port).apply { soTimeout = 5_000 }
+            try {
+                disconnectedClient.getOutputStream().write(
+                    chatRequest(
+                        """{"model":"active-model","messages":[{"role":"user","content":"disconnect"}],"stream":true}"""
+                    ).toByteArray(Charsets.UTF_8)
+                )
+                disconnectedClient.getOutputStream().flush()
+                disconnectedClient.shutdownOutput()
+
+                val reader = disconnectedClient.getInputStream().bufferedReader(Charsets.UTF_8)
+                while (reader.readLine()?.isEmpty() == false) Unit // HTTP response headers
+                var sawGeneratedChunk = false
+                while (true) {
+                    val line = reader.readLine() ?: break
+                    if (line.contains("disconnect-ready")) {
+                        sawGeneratedChunk = true
+                        break
+                    }
+                }
+                assertTrue("first streamed chunk should reach the client", sawGeneratedChunk)
+                assertTrue(firstStarted.await(2, TimeUnit.SECONDS))
+                disconnectedClient.setSoLinger(true, 0)
+            } finally {
+                runCatching { disconnectedClient.close() }
+            }
+
+            assertTrue("provider flow should be cancelled after peer disconnect", firstCancelled.await(5, TimeUnit.SECONDS))
+            val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
+            var recoveredResponse = ""
+            do {
+                recoveredResponse = rawHttp(
+                    port,
+                    chatRequest(
+                        """{"model":"active-model","messages":[{"role":"user","content":"retry"}],"stream":true}"""
+                    )
+                )
+                if (recoveredResponse.startsWith("HTTP/1.1 409 Conflict")) Thread.sleep(50L)
+            } while (recoveredResponse.startsWith("HTTP/1.1 409 Conflict") && System.nanoTime() < deadline)
+
+            assertTrue(recoveredResponse.startsWith("HTTP/1.1 200 OK"))
+            assertTrue(recoveredResponse.contains("recovered"))
+            assertEquals(2, providerCalls.get())
+        }
+    }
+
+    @Test
+    fun authenticatedModelsRouteKeepsChatCompatibilityAndPublishesSafeImageDiscovery() {
+        withServer(apiKey = "secret") { port ->
+            LocalApiRuntime.modelsJsonProvider = {
+                """{"object":"list","data":[
+                    {"id":"chat-a","object":"model","owned_by":"local","runtime":"LLAMA_CPP"},
+                    {"id":"image:image-a","object":"model","owned_by":"local","type":"image_generation","configured":true,"runtime":"QNN_HTP","family":"SD15","task":"text_to_image","task_modes":["text_to_image","control"],"max_batch_count":1,"capabilities":{"image_generation":true,"task_modes":["text_to_image","control"],"max_batch_count":1,"path":"/data/user/0/private/control.bin","api_key":"never-public"},"defaults":{"size":"512x512","width":512,"height":512,"steps":20,"cfg_scale":7.5},"path":"D:\\private\\model.bin"}
+                ]}"""
+            }
+
+            val response = rawHttp(port, authenticatedGet("/v1/models"))
+            val data = responseJson(response).getJSONArray("data")
+
+            assertTrue(response.startsWith("HTTP/1.1 200 OK"))
+            assertEquals(2, data.length())
+            val chat = data.getJSONObject(0)
+            val image = data.getJSONObject(1)
+            assertEquals("chat-a", chat.getString("id"))
+            assertEquals("model", chat.getString("object"))
+            assertEquals("image:image-a", image.getString("id"))
+            assertEquals("image_generation", image.getString("type"))
+            assertEquals("QNN_HTP", image.getString("runtime"))
+            assertEquals("SD15", image.getString("family"))
+            assertEquals("text_to_image", image.getString("task"))
+            assertEquals(1, image.getInt("max_batch_count"))
+            assertEquals(512, image.getJSONObject("defaults").getInt("width"))
+            assertTrue(image.getJSONObject("capabilities").getBoolean("image_generation"))
+            assertFalse(image.has("path"))
+            assertFalse(image.getJSONObject("capabilities").has("path"))
+            assertFalse(image.getJSONObject("capabilities").has("api_key"))
+            assertFalse(image.has("engineLifecycle"))
+            assertFalse(image.has("loaded"))
+            assertFalse(response.contains("D:\\private"))
+            assertFalse(response.contains("/data/user/0/private"))
+            assertFalse(response.contains("never-public"))
+        }
+    }
+
+    @Test
+    fun modelsRouteRedactsPathsAndKeepsProfileStateScopedToEachModel() {
+        withServer(apiKey = "secret") { port ->
+            LocalApiRuntime.loadedModelJsonProvider = { """{"id":"active-model"}""" }
+            LocalApiRuntime.generationParamsProvider = {
+                GenerationParams(nCtx = 8190, nPredict = 64, systemPrompt = "")
+            }
+            LocalApiRuntime.nativeStatsJsonProvider = {
+                """{"backend":"llama_cpp","loaded":true,"nCtx":8192,"maxAllTokens":8192}"""
+            }
+            LocalApiRuntime.modelsJsonProvider = {
+                """{"object":"list","data":[
+                    {"id":"active-model","path":"D:\\models\\active.gguf","n_ctx":32768,"context_length":32768,"max_output_tokens":4096},
+                    {"id":"other-model","path":"/storage/emulated/0/other.gguf","n_ctx":32768,"profileId":"wrong-global-profile"}
+                ]}"""
+            }
+            LocalApiRuntime.modelRuntimeStatesJsonProvider = {
+                """{"other-model":{"profileId":"other-profile","profileRecordState":"committed","profileVerificationLevel":"safe","reloadRequired":true,"engineLifecycle":"unloaded","tuningJobState":"idle"}}"""
+            }
+            LocalApiRuntime.controlPlane = object : LocalApiControlPlane {
+                override fun profileJson(): String =
+                    """{"modelId":"active-model","profileId":"active-profile","recordState":"committed","verification":"device_verified","reloadRequired":false,"engineLifecycle":"ready"}"""
+
+                override fun tuningJson(): String =
+                    """{"modelId":"active-model","jobId":"job-active","state":"succeeded"}"""
+            }
+
+            val response = rawHttp(port, "GET /v1/models HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
+            val data = JSONObject(response.substringAfter("\r\n\r\n")).getJSONArray("data")
+            val active = data.getJSONObject(0)
+            val other = data.getJSONObject(1)
+
+            assertFalse(response.contains("D:\\models"))
+            assertFalse(response.contains("/storage/emulated"))
+            assertFalse(active.has("path"))
+            assertEquals(8190, active.getInt("n_ctx"))
+            assertEquals(8190, active.getInt("context_length"))
+            assertEquals(8190, active.getInt("max_context_length"))
+            assertFalse(active.has("max_output_tokens"))
+            assertEquals("active-profile", active.getString("profileId"))
+            assertEquals("device_verified", active.getString("profileVerificationLevel"))
+            assertEquals("succeeded", active.getString("tuningJobState"))
+            assertEquals("other-profile", other.getString("profileId"))
+            assertEquals("safe", other.getString("profileVerificationLevel"))
+            assertTrue(other.getBoolean("reloadRequired"))
+            assertFalse(other.toString().contains("active-profile"))
+            assertFalse(other.toString().contains("wrong-global-profile"))
+            assertFalse(other.has("n_ctx"))
+            assertFalse(other.has("context_length"))
+            assertFalse(other.has("max_context_length"))
+
+            val metrics = responseJson(rawHttp(port, authenticatedGet("/metrics")))
+            assertEquals(8192, metrics.getInt("nCtx"))
+        }
+    }
+
+    @Test
+    fun oversizedStreamingPromptReturns413BeforeSseOrGenerationStarts() {
+        val generationCalls = AtomicInteger(0)
+        withServer(apiKey = "secret") { port ->
+            LocalApiRuntime.generationParamsProvider = {
+                GenerationParams(nCtx = 512, nPredict = 16, systemPrompt = "")
+            }
+            LocalApiRuntime.streamChatProvider = {
+                generationCalls.incrementAndGet()
+                flowOf(GenerateEvent.Chunk("should not run", RuntimeStats()))
+            }
+            val body = JSONObject()
+                .put("stream", true)
+                .put(
+                    "messages",
+                    org.json.JSONArray().put(
+                        JSONObject()
+                            .put("role", "user")
+                            .put("content", "长".repeat(400))
+                    )
+                )
+                .toString()
+
+            val response = rawHttp(port, chatRequest(body))
+            val error = responseJson(response).getJSONObject("error")
+
+            assertTrue(response.startsWith("HTTP/1.1 413 Payload Too Large"))
+            assertEquals("context_length_exceeded", error.getString("code"))
+            assertEquals(512, error.getJSONObject("details").getInt("n_ctx"))
+            assertEquals(512, error.getJSONObject("details").getInt("context_length"))
+            assertFalse(response.contains("Content-Type: text/event-stream"))
+            assertFalse(response.contains("data: [DONE]"))
+            assertEquals(0, generationCalls.get())
+        }
+    }
+
+    @Test
+    fun compactCustomContextIsGuardedAgainstItsExactNativeSize() {
+        val generationCalls = AtomicInteger(0)
+        withServer(apiKey = "secret") { port ->
+            LocalApiRuntime.generationParamsProvider = {
+                GenerationParams(nCtx = 128, nPredict = 8, systemPrompt = "")
+            }
+            LocalApiRuntime.streamChatProvider = {
+                generationCalls.incrementAndGet()
+                flowOf(GenerateEvent.Chunk("should not run", RuntimeStats()))
+            }
+            val body = JSONObject()
+                .put(
+                    "messages",
+                    org.json.JSONArray().put(
+                        JSONObject()
+                            .put("role", "user")
+                            .put("content", "x".repeat(600))
+                    )
+                )
+                .toString()
+
+            val response = rawHttp(port, chatRequest(body))
+            val details = responseJson(response).getJSONObject("error").getJSONObject("details")
+
+            assertTrue(response.startsWith("HTTP/1.1 413 Payload Too Large"))
+            assertEquals(128, details.getInt("n_ctx"))
+            assertEquals(128, details.getInt("context_length"))
+            assertEquals(0, generationCalls.get())
+        }
+    }
+
+    @Test
+    fun downstreamContextOverflowIsNormalizedToStructured413() {
+        withServer(apiKey = "secret") { port ->
+            LocalApiRuntime.generationParamsProvider = {
+                GenerationParams(nCtx = 8190, nPredict = 16, systemPrompt = "")
+            }
+            LocalApiRuntime.streamChatProvider = {
+                flowOf(
+                    GenerateEvent.Error(
+                        "当前输入约 9000 token，超过本机安全上下文预算。请缩短输入。",
+                        RuntimeStats()
+                    )
+                )
+            }
+            val body = """{"model":"active-model","messages":[{"role":"user","content":"hi"}],"stream":false}"""
+
+            val response = rawHttp(port, chatRequest(body))
+            val error = responseJson(response).getJSONObject("error")
+
+            assertTrue(response.startsWith("HTTP/1.1 413 Payload Too Large"))
+            assertEquals("context_length_exceeded", error.getString("code"))
+            assertFalse(response.contains("generation_failed"))
+        }
+    }
+
+    @Test
+    fun metricsExposeCanonicalCoordinatorSignaturesWithoutProfileInternals() {
+        withServer(apiKey = "secret") { port ->
+            LocalApiRuntime.nativeStatsJsonProvider = {
+                """{"backend":"llama_cpp","loaded":true,"modelFileSizeBytes":11686646144,"mmapFallbackAllowed":false,"mmapPrefetchEnabled":false,"mmap":true,"mlock":false,"generationSequence":17,"decodeTps":9.5,"persistentPrefixCache":{"attempted":true,"hit":true,"saved":false,"tokens":384,"reason":"state_loaded"},"modelPath":"D:\\private\\model.gguf","mnnDebugPrompt":"prompt-private","mnnDebugRawOutput":"output-private","loadedConfigJson":"{\"modelPath\":\"/data/private/model.gguf\"}","authToken":"token-private"}"""
+            }
+            LocalApiRuntime.controlPlane = object : LocalApiControlPlane {
+                override fun profileJson(): String =
+                    """{"profileId":"profile-1","path":"D:\\private\\model.gguf","signatures":{"desired":"d","resolvedLoad":"r","activeLoaded":"a","committedExecution":"c","runtimeOverride":"NONE","effectiveExecution":"e"}}"""
+            }
+
+            val response = rawHttp(port, authenticatedGet("/metrics"))
+            val metrics = JSONObject(response.substringAfter("\r\n\r\n"))
+            val signatures = metrics.getJSONObject("coordinatorSignatures")
+
+            assertEquals("d", signatures.getString("desired"))
+            assertEquals("r", signatures.getString("resolved"))
+            assertEquals("a", signatures.getString("active"))
+            assertEquals("c", signatures.getString("committed"))
+            assertEquals("NONE", signatures.getString("override"))
+            assertEquals("e", signatures.getString("effective"))
+            assertEquals("llama_cpp", metrics.getString("backend"))
+            assertEquals(11_686_646_144L, metrics.getLong("modelFileSizeBytes"))
+            assertFalse(metrics.getBoolean("mmapFallbackAllowed"))
+            assertFalse(metrics.getBoolean("mmapPrefetchEnabled"))
+            assertTrue(metrics.getBoolean("mmap"))
+            assertFalse(metrics.getBoolean("mlock"))
+            assertEquals(17L, metrics.getLong("generationSequence"))
+            assertEquals(9.5, metrics.getDouble("decodeTps"), 0.0)
+            assertTrue(metrics.getBoolean("persistentPrefixCacheAttempted"))
+            assertTrue(metrics.getBoolean("persistentPrefixCacheHit"))
+            assertFalse(metrics.getBoolean("persistentPrefixCacheSaved"))
+            assertEquals(384, metrics.getInt("persistentPrefixCacheTokens"))
+            assertEquals("state_loaded", metrics.getString("persistentPrefixCacheReason"))
+            assertFalse(response.contains("D:\\private"))
+            assertFalse(response.contains("profile-1"))
+            assertFalse(response.contains("prompt-private"))
+            assertFalse(response.contains("output-private"))
+            assertFalse(response.contains("/data/private"))
+            assertFalse(response.contains("token-private"))
+        }
+    }
+
+    @Test
+    fun runtimeProfileTuningAndJobRoutesRedactPrivateCoordinatorFields() {
+        withServer(apiKey = "secret") { port ->
+            LocalApiRuntime.controlPlane = object : LocalApiControlPlane {
+                override fun busyState(): LocalApiBusyState = LocalApiBusyState(
+                    busy = true,
+                    detailsJson = """{"deviceId":"device-private","activeJobId":"job-safe"}"""
+                )
+
+                override fun profileJson(): String =
+                    """{"profileId":"profile-safe","identityHash":"identity-private","installationScopeId":"scope-private","apiKey":"key-private"}"""
+
+                override fun tuningJson(): String =
+                    """{"jobId":"job-safe","state":"recovering","rawPrompt":"prompt-private","authToken":"token-private","profile":{"identityHash":"nested-private"}}"""
+
+                override fun tuningJob(jobId: String?): LocalApiControlResult =
+                    LocalApiControlResult.Success(tuningJson())
+            }
+
+            val profile = rawHttp(port, authenticatedGet("/v1/mca/profile"))
+            val tuning = rawHttp(port, authenticatedGet("/v1/mca/tuning"))
+            val runtime = rawHttp(port, authenticatedGet("/v1/mca/runtime"))
+            val job = rawHttp(port, authenticatedGet("/v1/tuning/jobs/current"))
+            val combined = profile + tuning + runtime + job
+
+            assertTrue(profile.contains("\"profileId\":\"profile-safe\""))
+            assertTrue(tuning.contains("\"jobId\":\"job-safe\""))
+            assertTrue(job.contains("\"tuningJobState\":\"recovering\""))
+            listOf(
+                "identity-private",
+                "scope-private",
+                "key-private",
+                "prompt-private",
+                "token-private",
+                "nested-private",
+                "device-private"
+            ).forEach { secret -> assertFalse(combined.contains(secret)) }
+            assertFalse(combined.contains("identityHash"))
+            assertFalse(combined.contains("installationScopeId"))
+            assertFalse(combined.contains("rawPrompt"))
+            assertFalse(combined.contains("authToken"))
+        }
+    }
+
+    @Test
+    fun protectedRoutesAcceptXApiKeyHeader() {
+        withServer(apiKey = "secret") { port ->
+            val response = rawHttp(
+                port,
+                "GET /metrics HTTP/1.1\r\nHost: 127.0.0.1\r\nX-API-Key: secret\r\n\r\n"
+            )
+
+            assertTrue(response.startsWith("HTTP/1.1 200 OK"))
+        }
+    }
+
+    @Test
+    fun chatRouteReturnsJsonErrorWhenEngineIsUnavailable() {
+        withServer(apiKey = "secret") { port ->
+            val body = """{"model":"active-model","messages":[{"role":"user","content":"hi"}],"stream":false}"""
+            val response = rawHttp(
+                port,
+                "POST /v1/chat/completions HTTP/1.1\r\n" +
+                    "Host: 127.0.0.1\r\n" +
+                    "Authorization: Bearer secret\r\n" +
+                    "Content-Type: application/json\r\n" +
+                    "Content-Length: ${body.toByteArray().size}\r\n\r\n" +
+                    body
+            )
+
+            assertTrue(response.startsWith("HTTP/1.1 503 Service Unavailable"))
+            assertTrue(response.contains("\"code\":\"engine_unavailable\""))
+        }
+    }
+
+    @Test
+    fun standardChatRouteRejectsMalformedJsonBeforeProviderExecution() {
+        val calls = AtomicInteger(0)
+        withServer(apiKey = "secret") { port ->
+            LocalApiRuntime.streamChatProvider = {
+                calls.incrementAndGet()
+                error("provider must not run")
+            }
+            val response = rawHttp(
+                port,
+                chatRequest("not-json")
+            )
+
+            assertTrue(response.startsWith("HTTP/1.1 400 Bad Request"))
+            assertTrue(response.contains("\"code\":\"invalid_request\""))
+            assertTrue(response.contains("\"param\":\"body\""))
+            assertEquals(0, calls.get())
+        }
+    }
+
+    @Test
+    fun standardChatRouteRejectsMissingModelBeforeProviderExecution() {
+        val calls = AtomicInteger(0)
+        withServer(apiKey = "secret") { port ->
+            LocalApiRuntime.streamChatProvider = {
+                calls.incrementAndGet()
+                error("provider must not run")
+            }
+            val body = """{"messages":[{"role":"user","content":"hi"}]}"""
+            val response = rawHttp(
+                port,
+                "POST /v1/chat/completions HTTP/1.1\r\n" +
+                    "Host: 127.0.0.1\r\n" +
+                    "Authorization: Bearer secret\r\n" +
+                    "Content-Type: application/json\r\n" +
+                    "Content-Length: ${body.toByteArray().size}\r\n\r\n" +
+                    body
+            )
+
+            assertTrue(response.startsWith("HTTP/1.1 400 Bad Request"))
+            assertTrue(response.contains("\"code\":\"invalid_request\""))
+            assertTrue(response.contains("\"param\":\"model\""))
+            assertEquals(0, calls.get())
+        }
+    }
+
+    @Test
+    fun standardChatRouteRejectsMissingMessagesBeforeProviderExecution() {
+        val calls = AtomicInteger(0)
+        withServer(apiKey = "secret") { port ->
+            LocalApiRuntime.streamChatProvider = {
+                calls.incrementAndGet()
+                error("provider must not run")
+            }
+            val response = rawHttp(
+                port,
+                authenticatedPost(
+                    "/v1/chat/completions",
+                    body = """{"model":"active-model"}"""
+                )
+            )
+
+            assertTrue(response.startsWith("HTTP/1.1 400 Bad Request"))
+            assertTrue(response.contains("\"param\":\"messages\""))
+            assertEquals(0, calls.get())
+        }
+    }
+
+    @Test
+    fun streamingRequestWithRuntimeFieldsReturns409BeforeSseHeaders() {
+        val generationCalls = AtomicInteger(0)
+        withServer(apiKey = "secret") { port ->
+            LocalApiRuntime.streamChatProvider = {
+                generationCalls.incrementAndGet()
+                flowOf(GenerateEvent.Chunk("should not run", RuntimeStats()))
+            }
+            val body = """{"model":"active-model","messages":[{"role":"user","content":"hi"}],"stream":true,"n_ctx":32768,"n_gpu_layers":99}"""
+
+            val response = rawHttp(port, chatRequest(body))
+
+            assertTrue(response.startsWith("HTTP/1.1 409 Conflict"))
+            assertTrue(response.contains("\"code\":\"parameter_scope_conflict\""))
+            assertTrue(response.contains("\"allowed_scope\":\"generation_only\""))
+            assertTrue(response.contains("n_ctx"))
+            assertTrue(response.contains("n_gpu_layers"))
+            assertFalse(response.contains("Content-Type: text/event-stream"))
+            assertFalse(response.contains("data: [DONE]"))
+            assertEquals(0, generationCalls.get())
+        }
+    }
+
+    @Test
+    fun busyCoordinatorReturns409AndRetryAfterBeforeGenerationStarts() {
+        val generationCalls = AtomicInteger(0)
+        val preflightCalls = AtomicInteger(0)
+        withServer(apiKey = "secret") { port ->
+            LocalApiRuntime.controlPlane = object : LocalApiControlPlane {
+                override fun busyState(): LocalApiBusyState = LocalApiBusyState(
+                    busy = true,
+                    code = "tuning_in_progress",
+                    message = "A tuning candidate is being validated.",
+                    retryAfterMs = 2500,
+                    detailsJson = """{"activeJobId":"job-7","engineLifecycle":"RELOADING"}"""
+                )
+
+                override fun preflight(request: LocalApiPreflightRequest): LocalApiPreflightResult {
+                    preflightCalls.incrementAndGet()
+                    return LocalApiPreflightResult.Ready
+                }
+            }
+            LocalApiRuntime.streamChatProvider = {
+                generationCalls.incrementAndGet()
+                flowOf(GenerateEvent.Chunk("should not run", RuntimeStats()))
+            }
+            val body = """{"model":"active-model","messages":[{"role":"user","content":"hi"}],"stream":true}"""
+
+            val response = rawHttp(port, chatRequest(body))
+
+            assertTrue(response.startsWith("HTTP/1.1 409 Conflict"))
+            assertTrue(response.contains("Retry-After: 3"))
+            assertTrue(response.contains("X-Retry-After-Ms: 2500"))
+            assertTrue(response.contains("\"code\":\"tuning_in_progress\""))
+            assertTrue(response.contains("\"activeJobId\":\"job-7\""))
+            assertFalse(response.contains("Content-Type: text/event-stream"))
+            assertEquals(0, preflightCalls.get())
+            assertEquals(0, generationCalls.get())
+        }
+    }
+
+    @Test
+    fun coordinatorPreflightSeesRouteStreamingModelAndCanRejectBeforeSse() {
+        val preflightCalls = AtomicInteger(0)
+        withServer(apiKey = "secret") { port ->
+            LocalApiRuntime.controlPlane = object : LocalApiControlPlane {
+                override fun preflight(request: LocalApiPreflightRequest): LocalApiPreflightResult {
+                    preflightCalls.incrementAndGet()
+                    assertEquals("/v1/chat/completions", request.route)
+                    assertTrue(request.streaming)
+                    assertEquals("requested-model", request.requestedModel)
+                    assertEquals("hi", request.chatRequest.messages.single().content)
+                    return LocalApiPreflightResult.Rejected(
+                        httpStatus = 409,
+                        code = "model_mismatch",
+                        message = "The requested model is not active.",
+                        detailsJson = """{"activeModelId":"other-model"}"""
+                    )
+                }
+            }
+            val body = """{"model":"requested-model","messages":[{"role":"user","content":"hi"}],"stream":true}"""
+
+            val response = rawHttp(port, chatRequest(body))
+
+            assertTrue(response.startsWith("HTTP/1.1 409 Conflict"))
+            assertTrue(response.contains("\"code\":\"model_mismatch\""))
+            assertTrue(response.contains("\"activeModelId\":\"other-model\""))
+            assertFalse(response.contains("Content-Type: text/event-stream"))
+            assertEquals(1, preflightCalls.get())
+        }
+    }
+
+    @Test
+    fun authenticatedRuntimeControlRoutesExposeBusyProfileAndTuningJson() {
+        withServer(apiKey = "secret") { port ->
+            LocalApiRuntime.controlPlane = object : LocalApiControlPlane {
+                override fun busyState(): LocalApiBusyState = LocalApiBusyState(
+                    busy = true,
+                    code = "tuning_in_progress",
+                    retryAfterMs = 1200
+                )
+
+                override fun profileJson(): String =
+                    """{"profileId":"profile-3","profileRecordState":"ACTIVE"}"""
+
+                override fun tuningJson(): String =
+                    """{"activeJobId":"job-9","tuningJobState":"RUNNING"}"""
+
+                override fun tuningJob(jobId: String?): LocalApiControlResult =
+                    LocalApiControlResult.Success(
+                        """{"jobId":"job-9","tuningJobState":"RUNNING"}"""
+                    )
+            }
+
+            val runtime = rawHttp(port, authenticatedGet("/v1/mca/runtime"))
+            val profile = rawHttp(port, authenticatedGet("/v1/mca/profile"))
+            val tuning = rawHttp(port, authenticatedGet("/v1/mca/tuning"))
+            val currentJob = rawHttp(port, authenticatedGet("/v1/tuning/jobs/current"))
+
+            assertTrue(runtime.startsWith("HTTP/1.1 200 OK"))
+            assertTrue(runtime.contains("\"busy\":true"))
+            assertTrue(runtime.contains("\"profileId\":\"profile-3\""))
+            assertTrue(runtime.contains("\"activeJobId\":\"job-9\""))
+            assertTrue(profile.contains("\"profileRecordState\":\"ACTIVE\""))
+            assertTrue(tuning.contains("\"tuningJobState\":\"RUNNING\""))
+            assertTrue(currentJob.startsWith("HTTP/1.1 200 OK"))
+            assertTrue(currentJob.contains("\"activeJobId\":\"job-9\""))
+        }
+    }
+
+    @Test
+    fun tuningJobQueryAndActionsUseCoordinatorWhileRuntimeIsBusy() {
+        val actionCalls = AtomicInteger(0)
+        val lastQuery = AtomicReference("unset")
+        val actionKeys = mutableListOf<String>()
+        withServer(apiKey = "secret") { port ->
+            LocalApiRuntime.controlPlane = object : LocalApiControlPlane {
+                override fun busyState(): LocalApiBusyState = LocalApiBusyState(
+                    busy = true,
+                    code = "tuning_in_progress",
+                    retryAfterMs = 5000,
+                    detailsJson = """{"activeJobId":"job-42","engineLifecycle":"RELOADING"}"""
+                )
+
+                override fun tuningJob(jobId: String?): LocalApiControlResult {
+                    lastQuery.set(jobId ?: "current")
+                    return LocalApiControlResult.Success(
+                        """{"jobId":"${jobId ?: "job-42"}","tuningJobState":"RUNNING","progress":0.5}"""
+                    )
+                }
+
+                override fun pauseTuningJob(jobId: String, idempotencyKey: String): LocalApiControlResult {
+                    actionCalls.incrementAndGet()
+                    actionKeys += idempotencyKey
+                    return LocalApiControlResult.Success(
+                        """{"jobId":"$jobId","tuningJobState":"PAUSED"}"""
+                    )
+                }
+
+                override fun resumeTuningJob(jobId: String, idempotencyKey: String): LocalApiControlResult {
+                    actionCalls.incrementAndGet()
+                    actionKeys += idempotencyKey
+                    return LocalApiControlResult.Success(
+                        """{"jobId":"$jobId","tuningJobState":"RUNNING"}"""
+                    )
+                }
+
+                override fun cancelTuningJob(jobId: String, idempotencyKey: String): LocalApiControlResult {
+                    actionCalls.incrementAndGet()
+                    actionKeys += idempotencyKey
+                    return LocalApiControlResult.Success(
+                        """{"jobId":"$jobId","tuningJobState":"CANCELLED"}"""
+                    )
+                }
+            }
+
+            val current = rawHttp(port, authenticatedGet("/v1/tuning/jobs/current"))
+            val query = rawHttp(port, authenticatedGet("/v1/tuning/jobs/job-42"))
+            val pause = rawHttp(port, authenticatedPost("/v1/tuning/jobs/job-42/pause", "idem-pause"))
+            val resume = rawHttp(port, authenticatedPost("/v1/tuning/jobs/job-42/resume", "idem-resume"))
+            val cancel = rawHttp(port, authenticatedPost("/v1/tuning/jobs/job-42/cancel", "idem-cancel"))
+
+            assertTrue(current.startsWith("HTTP/1.1 200 OK"))
+            assertTrue(current.contains("\"tuningJobState\":\"RUNNING\""))
+            assertTrue(query.startsWith("HTTP/1.1 200 OK"))
+            assertEquals("job-42", lastQuery.get())
+            assertTrue(pause.startsWith("HTTP/1.1 200 OK"))
+            assertTrue(pause.contains("\"tuningJobState\":\"PAUSED\""))
+            assertTrue(resume.contains("\"tuningJobState\":\"RUNNING\""))
+            assertTrue(cancel.contains("\"tuningJobState\":\"CANCELLED\""))
+            assertEquals(3, actionCalls.get())
+            assertEquals(listOf("idem-pause", "idem-resume", "idem-cancel"), actionKeys)
+            assertFalse(pause.startsWith("HTTP/1.1 409 Conflict"))
+        }
+    }
+
+    @Test
+    fun tuningJobRoutesRequireBearerAndIdempotencyKey() {
+        val actionCalls = AtomicInteger(0)
+        withServer(apiKey = "secret") { port ->
+            LocalApiRuntime.controlPlane = object : LocalApiControlPlane {
+                override fun cancelTuningJob(jobId: String, idempotencyKey: String): LocalApiControlResult {
+                    actionCalls.incrementAndGet()
+                    return LocalApiControlResult.Success("""{"jobId":"$jobId","tuningJobState":"CANCELLED"}""")
+                }
+            }
+
+            val unauthorized = rawHttp(port, "GET /v1/tuning/jobs/current HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
+            val missingKey = rawHttp(port, authenticatedPost("/v1/tuning/jobs/job-1/cancel"))
+
+            assertTrue(unauthorized.startsWith("HTTP/1.1 401 Unauthorized"))
+            assertTrue(unauthorized.contains("\"code\":\"unauthorized\""))
+            assertTrue(missingKey.startsWith("HTTP/1.1 400 Bad Request"))
+            assertTrue(missingKey.contains("\"code\":\"idempotency_key_required\""))
+            assertEquals(0, actionCalls.get())
+        }
+    }
+
+    @Test
+    fun tuningCreateApplyAndRollbackUseAuthenticatedControlPlane() {
+        val created = AtomicReference<LocalApiTuningJobCreateRequest>()
+        val calls = mutableListOf<String>()
+        withServer(apiKey = "secret") { port ->
+            LocalApiRuntime.controlPlane = object : LocalApiControlPlane {
+                override fun createTuningJob(
+                    request: LocalApiTuningJobCreateRequest,
+                    idempotencyKey: String
+                ): LocalApiControlResult {
+                    created.set(request)
+                    calls += "create:$idempotencyKey"
+                    return LocalApiControlResult.Success("""{"jobId":"job-created","tuningJobState":"QUEUED"}""", 201)
+                }
+
+                override fun applyTuningJob(jobId: String, idempotencyKey: String): LocalApiControlResult {
+                    calls += "apply:$jobId:$idempotencyKey"
+                    return LocalApiControlResult.Success("""{"jobId":"$jobId","applied":true}""")
+                }
+
+                override fun rollbackTuning(idempotencyKey: String): LocalApiControlResult {
+                    calls += "rollback:$idempotencyKey"
+                    return LocalApiControlResult.Success("""{"rolledBack":true}""")
+                }
+            }
+
+            val createBody = """{"modelId":"qwen35 4b mnn bundle","mode":"standard","autoApply":false,"performancePreference":"balanced"}"""
+            val create = rawHttp(port, authenticatedPost("/v1/tuning/jobs", "idem-create", createBody))
+            val apply = rawHttp(port, authenticatedPost("/v1/tuning/jobs/job-created/apply", "idem-apply"))
+            val rollback = rawHttp(port, authenticatedPost("/v1/tuning/rollback", "idem-rollback"))
+
+            assertTrue(create.startsWith("HTTP/1.1 201 Created"))
+            assertEquals("qwen35 4b mnn bundle", created.get().modelId)
+            assertEquals("standard", created.get().mode)
+            assertFalse(created.get().autoApply)
+            assertEquals("balanced", created.get().performancePreference)
+            assertTrue(apply.contains("\"applied\":true"))
+            assertTrue(rollback.contains("\"rolledBack\":true"))
+            assertEquals(
+                listOf("create:idem-create", "apply:job-created:idem-apply", "rollback:idem-rollback"),
+                calls
+            )
+        }
+    }
+
+    @Test
+    fun exactIdempotentRetryReplaysOriginalCreateResultOnlyOnce() {
+        val calls = AtomicInteger(0)
+        val persistedContext = AtomicReference<LocalApiIdempotencyContext>()
+        withServer(apiKey = "secret") { port ->
+            LocalApiRuntime.controlPlane = object : LocalApiControlPlane {
+                override fun createTuningJob(
+                    request: LocalApiTuningJobCreateRequest,
+                    idempotency: LocalApiIdempotencyContext
+                ): LocalApiControlResult {
+                    calls.incrementAndGet()
+                    persistedContext.set(idempotency)
+                    return LocalApiControlResult.Success(
+                        """{"jobId":"job-once","state":"queued","autoApply":${request.autoApply}}""",
+                        201
+                    )
+                }
+            }
+            val firstBody = """{"modelId":"model-a","mode":"standard","autoApply":false}"""
+            val reorderedBody = """{"autoApply":false,"mode":"standard","modelId":"model-a"}"""
+
+            val first = rawHttp(port, authenticatedPost("/v1/tuning/jobs", "same-key", firstBody))
+            val replay = rawHttp(port, authenticatedPost("/v1/tuning/jobs", "same-key", reorderedBody))
+
+            assertEquals(first, replay)
+            assertTrue(replay.startsWith("HTTP/1.1 201 Created"))
+            assertTrue(replay.contains("\"jobId\":\"job-once\""))
+            assertEquals(1, calls.get())
+            assertEquals("same-key", persistedContext.get().key)
+            assertTrue(persistedContext.get().requestFingerprint.matches(Regex("[0-9a-f]{64}")))
+        }
+    }
+
+    @Test
+    fun actionBodyParticipatesInFingerprintAndUnknownFieldsAreRejected() {
+        val calls = AtomicInteger(0)
+        withServer(apiKey = "secret") { port ->
+            LocalApiRuntime.controlPlane = object : LocalApiControlPlane {
+                override fun cancelTuningJob(jobId: String, idempotencyKey: String): LocalApiControlResult {
+                    calls.incrementAndGet()
+                    return LocalApiControlResult.Success("""{"jobId":"$jobId","state":"canceling"}""")
+                }
+            }
+
+            val accepted = rawHttp(port, authenticatedPost("/v1/tuning/jobs/job-a/cancel", "action-key"))
+            val conflicting = rawHttp(
+                port,
+                authenticatedPost("/v1/tuning/jobs/job-a/cancel", "action-key", """{"force":true}""")
+            )
+            val unsupported = rawHttp(
+                port,
+                authenticatedPost("/v1/tuning/jobs/job-a/cancel", "new-action-key", """{"force":true}""")
+            )
+
+            assertTrue(accepted.startsWith("HTTP/1.1 200 OK"))
+            assertTrue(conflicting.startsWith("HTTP/1.1 409 Conflict"))
+            assertTrue(conflicting.contains("\"code\":\"idempotency_key_conflict\""))
+            assertTrue(unsupported.startsWith("HTTP/1.1 400 Bad Request"))
+            assertTrue(unsupported.contains("\"code\":\"unsupported_tuning_fields\""))
+            assertEquals(1, calls.get())
+        }
+    }
+
+    @Test
+    fun powerSaveTuningModeReachesCoordinator() {
+        val created = AtomicReference<LocalApiTuningJobCreateRequest>()
+        withServer(apiKey = "secret") { port ->
+            LocalApiRuntime.controlPlane = object : LocalApiControlPlane {
+                override fun createTuningJob(
+                    request: LocalApiTuningJobCreateRequest,
+                    idempotencyKey: String
+                ): LocalApiControlResult {
+                    created.set(request)
+                    return LocalApiControlResult.Success("""{"jobId":"power-job"}""", 201)
+                }
+            }
+            val body = """{"modelId":"model-a","mode":"power_save","autoApply":false}"""
+
+            val response = rawHttp(port, authenticatedPost("/v1/tuning/jobs", "power-key", body))
+
+            assertTrue(response.startsWith("HTTP/1.1 201 Created"))
+            assertEquals("power_save", created.get().mode)
+            assertFalse(created.get().autoApply)
+        }
+    }
+
+    @Test
+    fun idempotencyKeyReuseForDifferentRequestReturnsConflict() {
+        val calls = AtomicInteger(0)
+        withServer(apiKey = "secret") { port ->
+            LocalApiRuntime.controlPlane = object : LocalApiControlPlane {
+                override fun createTuningJob(
+                    request: LocalApiTuningJobCreateRequest,
+                    idempotencyKey: String
+                ): LocalApiControlResult {
+                    calls.incrementAndGet()
+                    return LocalApiControlResult.Success("""{"jobId":"job-a"}""", 201)
+                }
+            }
+            val firstBody = """{"modelId":"model-a","mode":"quick","autoApply":true}"""
+            val conflictingBody = """{"modelId":"model-b","mode":"quick","autoApply":true}"""
+
+            val first = rawHttp(port, authenticatedPost("/v1/tuning/jobs", "reused-key", firstBody))
+            val conflict = rawHttp(port, authenticatedPost("/v1/tuning/jobs", "reused-key", conflictingBody))
+
+            assertTrue(first.startsWith("HTTP/1.1 201 Created"))
+            assertTrue(conflict.startsWith("HTTP/1.1 409 Conflict"))
+            assertTrue(conflict.contains("\"code\":\"idempotency_key_conflict\""))
+            assertTrue(conflict.contains("originalRequestFingerprint"))
+            assertTrue(conflict.contains("conflictingRequestFingerprint"))
+            assertEquals(1, calls.get())
+        }
+    }
+
+    @Test
+    fun exactReplaySurvivesLoopbackServerRebindWithinAppProcess() {
+        val calls = AtomicInteger(0)
+        val firstPort = freePort()
+        val secondPort = freePort()
+        val firstServer = McaLoopbackServer(firstPort, "127.0.0.1", "secret")
+        val secondServer = McaLoopbackServer(secondPort, "127.0.0.1", "secret")
+        val body = """{"modelId":"model-a","mode":"quick","autoApply":true}"""
+        try {
+            firstServer.clearProcessIdempotencyCacheForTests()
+            LocalApiRuntime.controlPlane = object : LocalApiControlPlane {
+                override fun createTuningJob(
+                    request: LocalApiTuningJobCreateRequest,
+                    idempotencyKey: String
+                ): LocalApiControlResult {
+                    calls.incrementAndGet()
+                    return LocalApiControlResult.Success("""{"jobId":"job-rebind"}""", 201)
+                }
+            }
+            firstServer.start()
+            val first = rawHttp(
+                firstPort,
+                authenticatedPost("/v1/tuning/jobs", "rebind-key", body)
+            )
+            firstServer.shutdown()
+            secondServer.start()
+            val replay = rawHttp(
+                secondPort,
+                authenticatedPost("/v1/tuning/jobs", "rebind-key", body)
+            )
+
+            assertEquals(first, replay)
+            assertEquals(1, calls.get())
+        } finally {
+            firstServer.shutdown()
+            secondServer.shutdown()
+            secondServer.clearProcessIdempotencyCacheForTests()
+            LocalApiRuntime.controlPlane = null
+        }
+    }
+
+    @Test
+    fun lifecycleChangingTuningWritesReturnDetailedConflictWhileRuntimeIsBusy() {
+        val mutationCalls = AtomicInteger(0)
+        withServer(apiKey = "secret") { port ->
+            LocalApiRuntime.controlPlane = object : LocalApiControlPlane {
+                override fun busyState(): LocalApiBusyState = LocalApiBusyState(
+                    busy = true,
+                    code = "tuning_in_progress",
+                    message = "candidate is validating",
+                    retryAfterMs = 2200,
+                    detailsJson = """{"activeJobId":"job-running"}"""
+                )
+
+                override fun profileJson(): String =
+                    """{"profileId":"profile-active","engineLifecycle":"reloading"}"""
+
+                override fun tuningJson(): String =
+                    """{"jobId":"job-running","state":"validating"}"""
+
+                override fun createTuningJob(
+                    request: LocalApiTuningJobCreateRequest,
+                    idempotencyKey: String
+                ): LocalApiControlResult {
+                    mutationCalls.incrementAndGet()
+                    return LocalApiControlResult.Success("{}")
+                }
+
+                override fun applyTuningJob(jobId: String, idempotencyKey: String): LocalApiControlResult {
+                    mutationCalls.incrementAndGet()
+                    return LocalApiControlResult.Success("{}")
+                }
+
+                override fun rollbackTuning(idempotencyKey: String): LocalApiControlResult {
+                    mutationCalls.incrementAndGet()
+                    return LocalApiControlResult.Success("{}")
+                }
+            }
+            val body = """{"modelId":"model-a","mode":"standard","autoApply":false}"""
+
+            val create = rawHttp(port, authenticatedPost("/v1/tuning/jobs", "busy-create", body))
+            val apply = rawHttp(port, authenticatedPost("/v1/tuning/jobs/job-running/apply", "busy-apply"))
+            val rollback = rawHttp(port, authenticatedPost("/v1/tuning/rollback", "busy-rollback"))
+
+            listOf(create, apply, rollback).forEach { response ->
+                assertTrue(response.startsWith("HTTP/1.1 409 Conflict"))
+                assertTrue(response.contains("Retry-After: 3"))
+                assertTrue(response.contains("\"activeJobId\":\"job-running\""))
+                assertTrue(response.contains("\"tuningJobState\":\"validating\""))
+                assertTrue(response.contains("\"engineLifecycle\":\"reloading\""))
+                assertTrue(response.contains("\"activeProfileId\":\"profile-active\""))
+                assertTrue(response.contains("\"retryAfterMs\":2200"))
+            }
+            assertEquals(0, mutationCalls.get())
+        }
+    }
+
+    @Test
+    fun transientLifecycleConflictDoesNotConsumeIdempotencyKey() {
+        val busy = AtomicReference(true)
+        val calls = AtomicInteger(0)
+        withServer(apiKey = "secret") { port ->
+            LocalApiRuntime.controlPlane = object : LocalApiControlPlane {
+                override fun busyState(): LocalApiBusyState = if (busy.get()) {
+                    LocalApiBusyState(
+                        busy = true,
+                        code = "model_reloading",
+                        retryAfterMs = 100
+                    )
+                } else {
+                    LocalApiBusyState.IDLE
+                }
+
+                override fun rollbackTuning(idempotencyKey: String): LocalApiControlResult {
+                    calls.incrementAndGet()
+                    return LocalApiControlResult.Success("""{"rolledBack":true}""")
+                }
+            }
+
+            val blocked = rawHttp(port, authenticatedPost("/v1/tuning/rollback", "retry-key"))
+            busy.set(false)
+            val retried = rawHttp(port, authenticatedPost("/v1/tuning/rollback", "retry-key"))
+            val replay = rawHttp(port, authenticatedPost("/v1/tuning/rollback", "retry-key"))
+
+            assertTrue(blocked.startsWith("HTTP/1.1 409 Conflict"))
+            assertTrue(retried.startsWith("HTTP/1.1 200 OK"))
+            assertEquals(retried, replay)
+            assertEquals(1, calls.get())
+        }
+    }
+
+    @Test
+    fun explicitJobQueryDoesNotMixGlobalStateAndCurrentKeepsRecoveringJob() {
+        withServer(apiKey = "secret") { port ->
+            LocalApiRuntime.controlPlane = object : LocalApiControlPlane {
+                override fun tuningJob(jobId: String?): LocalApiControlResult =
+                    if (jobId == null) {
+                        LocalApiControlResult.Success(
+                            """{"jobId":"job-recovering","state":"recovering","phase":"journal_recovery"}"""
+                        )
+                    } else {
+                        LocalApiControlResult.Success(
+                            """{"activeJobId":"unrelated-current","state":"running","job":{"jobId":"$jobId","state":"failed","phase":"canary"}}"""
+                        )
+                    }
+            }
+
+            val current = rawHttp(port, authenticatedGet("/v1/tuning/jobs/current"))
+            val historical = rawHttp(port, authenticatedGet("/v1/tuning/jobs/job-old"))
+
+            assertTrue(current.contains("\"jobId\":\"job-recovering\""))
+            assertTrue(current.contains("\"tuningJobState\":\"recovering\""))
+            assertTrue(historical.contains("\"jobId\":\"job-old\""))
+            assertTrue(historical.contains("\"tuningJobState\":\"failed\""))
+            assertFalse(historical.contains("unrelated-current"))
+            assertFalse(historical.contains("\"state\":\"running\""))
+        }
+    }
+
+    @Test
+    fun explicitCurrentJobKeepsProgressHardGatesAndDiffEvidence() {
+        withServer(apiKey = "secret") { port ->
+            LocalApiRuntime.controlPlane = object : LocalApiControlPlane {
+                override fun tuningJob(jobId: String?): LocalApiControlResult =
+                    LocalApiControlResult.Success(
+                        """{"jobId":"job-42","progress":{"completed":2,"total":4},"hardGates":{"safety":true,"signature":true},"diff":{"n_threads":[4,6]},"job":{"jobId":"job-42","state":"validating","phase":"canary"}}"""
+                    )
+            }
+
+            val response = rawHttp(port, authenticatedGet("/v1/tuning/jobs/job-42"))
+            val job = JSONObject(response.substringAfter("\r\n\r\n"))
+
+            assertTrue(response.startsWith("HTTP/1.1 200 OK"))
+            assertEquals(2, job.getJSONObject("progress").getInt("completed"))
+            assertEquals(4, job.getJSONObject("progress").getInt("total"))
+            assertTrue(job.getJSONObject("hardGates").getBoolean("safety"))
+            assertTrue(job.getJSONObject("hardGates").getBoolean("signature"))
+            assertEquals(6, job.getJSONObject("diff").getJSONArray("n_threads").getInt(1))
+            assertEquals("validating", job.getString("tuningJobState"))
+        }
+    }
+
+    @Test
+    fun tuningCreateRejectsUnknownFieldsBeforeControlPlane() {
+        val calls = AtomicInteger(0)
+        withServer(apiKey = "secret") { port ->
+            LocalApiRuntime.controlPlane = object : LocalApiControlPlane {
+                override fun createTuningJob(
+                    request: LocalApiTuningJobCreateRequest,
+                    idempotencyKey: String
+                ): LocalApiControlResult {
+                    calls.incrementAndGet()
+                    return LocalApiControlResult.Success("{}")
+                }
+            }
+            val body = """{"modelId":"model","mode":"quick","autoApply":false,"n_ctx":8192}"""
+            val response = rawHttp(port, authenticatedPost("/v1/tuning/jobs", "idem-create", body))
+
+            assertTrue(response.startsWith("HTTP/1.1 400 Bad Request"))
+            assertTrue(response.contains("\"code\":\"unsupported_tuning_fields\""))
+            assertEquals(0, calls.get())
+        }
+    }
+
+    @Test
+    fun formalTuningJobRouteDoesNotBypassMissingAppControlPlane() {
+        withServer(apiKey = "secret") { port ->
+            val response = rawHttp(port, authenticatedGet("/v1/tuning/jobs/current"))
+
+            assertTrue(response.startsWith("HTTP/1.1 503 Service Unavailable"))
+            assertTrue(response.contains("\"code\":\"control_plane_unavailable\""))
+        }
+    }
+
+    @Test
+    fun chatPreservesWhitespaceChunksAndIgnoresLateEventsAfterDone() {
+        withServer(apiKey = "secret") { port ->
+            LocalApiRuntime.streamChatProvider = {
+                flowOf(
+                    GenerateEvent.Chunk(text = " \n", stats = RuntimeStats(completionTokens = 1)),
+                    GenerateEvent.Done(RuntimeStats(completionTokens = 1)),
+                    GenerateEvent.Chunk(text = "late", stats = RuntimeStats(completionTokens = 2)),
+                    GenerateEvent.Error("late error", RuntimeStats())
+                )
+            }
+            for (streaming in listOf(false, true)) {
+                val body = JSONObject().put("model", "active-model")
+                    .put("messages", JSONArray().put(JSONObject().put("role", "user").put("content", "hi")))
+                    .put("stream", streaming).toString()
+                val response = rawHttp(
+                    port,
+                    "POST /v1/chat/completions HTTP/1.1\r\n" +
+                        "Host: 127.0.0.1\r\nAuthorization: Bearer secret\r\n" +
+                        "Content-Type: application/json\r\nContent-Length: ${body.toByteArray().size}\r\n\r\n" + body
+                )
+                assertTrue(response.startsWith("HTTP/1.1 200 OK"))
+                assertFalse(response.contains("generation_empty_visible_output"))
+                assertFalse(response.contains("late"))
+                val text = if (streaming) {
+                    response.lineSequence().filter { it.startsWith("data: {") }
+                        .map { JSONObject(it.removePrefix("data: ")) }
+                        .mapNotNull { it.optJSONArray("choices")?.optJSONObject(0)?.optJSONObject("delta")?.optString("content") }
+                        .joinToString("")
+                } else {
+                    responseJson(response).getJSONArray("choices").getJSONObject(0)
+                        .getJSONObject("message").getString("content")
+                }
+                assertEquals(" \n", text)
+            }
+        }
+    }
+
+    @Test
+    fun streamingChatDoesNotStopWhenHiddenReasoningPrecedesVisibleContent() {
+        val stopCalls = AtomicInteger(0)
+        withServer(apiKey = "secret") { port ->
+            LocalApiRuntime.streamChatProvider = {
+                flowOf(
+                    GenerateEvent.Chunk(
+                        text = "",
+                        stats = RuntimeStats(completionTokens = 128),
+                        hiddenReasoning = true
+                    ),
+                    GenerateEvent.Chunk(
+                        text = "visible answer",
+                        stats = RuntimeStats(completionTokens = 130)
+                    ),
+                    GenerateEvent.Done(RuntimeStats(completionTokens = 130))
+                )
+            }
+            LocalApiRuntime.stopGenerationProvider = { stopCalls.incrementAndGet() }
+            val body = """{"model":"active-model","messages":[{"role":"user","content":"hi"}],"stream":true,"hide_reasoning":true}"""
+            val response = rawHttp(
+                port,
+                "POST /v1/chat/completions HTTP/1.1\r\n" +
+                    "Host: 127.0.0.1\r\n" +
+                    "Authorization: Bearer secret\r\n" +
+                    "Content-Type: application/json\r\n" +
+                    "Content-Length: ${body.toByteArray().size}\r\n\r\n" +
+                    body
+            )
+
+            assertTrue(response.startsWith("HTTP/1.1 200 OK"))
+            assertTrue(response.contains("visible answer"))
+            assertTrue(response.contains("data: [DONE]"))
+            assertFalse(response.contains("[MCA 提示]"))
+            assertEquals(0, stopCalls.get())
+        }
+    }
+
+    @Test
+    fun streamingChatAddsDoneWhenProviderCompletesWithoutDoneEvent() {
+        withServer(apiKey = "secret") { port ->
+            LocalApiRuntime.streamChatProvider = { flowOf(GenerateEvent.Chunk(text = "partial", stats = RuntimeStats(completionTokens = 1))) }
+            val body = """{"model":"active-model","messages":[{"role":"user","content":"hi"}],"stream":true}"""
+            val response = rawHttp(
+                port,
+                "POST /v1/chat/completions HTTP/1.1\r\n" +
+                    "Host: 127.0.0.1\r\n" +
+                    "Authorization: Bearer secret\r\n" +
+                    "Content-Type: application/json\r\n" +
+                    "Content-Length: ${body.toByteArray().size}\r\n\r\n" +
+                    body
+            )
+
+            assertTrue(response.startsWith("HTTP/1.1 200 OK"))
+            assertTrue(response.contains("partial"))
+            assertTrue(response.contains("data: [DONE]"))
+        }
+    }
+
+    @Test
+    fun streamingChatReportsEmptyVisibleOutputForHiddenReasoningOnlyFlowWithoutStoppingGeneration() {
+        val stopCalls = AtomicInteger(0)
+        withServer(apiKey = "secret") { port ->
+            LocalApiRuntime.streamChatProvider = {
+                flowOf(
+                    GenerateEvent.Chunk(
+                        text = "",
+                        stats = RuntimeStats(completionTokens = 256),
+                        hiddenReasoning = true
+                    )
+                )
+            }
+            LocalApiRuntime.stopGenerationProvider = { stopCalls.incrementAndGet() }
+            val body = """{"model":"active-model","messages":[{"role":"user","content":"hi"}],"stream":true,"hide_reasoning":true}"""
+            val response = rawHttp(
+                port,
+                "POST /v1/chat/completions HTTP/1.1\r\n" +
+                    "Host: 127.0.0.1\r\n" +
+                    "Authorization: Bearer secret\r\n" +
+                    "Content-Type: application/json\r\n" +
+                    "Content-Length: ${body.toByteArray().size}\r\n\r\n" +
+                    body
+            )
+
+            assertTrue(response.startsWith("HTTP/1.1 200 OK"))
+            assertTrue(response.contains("generation_empty_visible_output"))
+            assertFalse(response.contains("[MCA 提示]"))
+            assertTrue(response.contains("data: [DONE]"))
+            assertEquals(0, stopCalls.get())
+        }
+    }
+
+    @Test
+    fun streamingChatClosesWithDoneEvenWhenProviderErrors() {
+        withServer(apiKey = "secret") { port ->
+            LocalApiRuntime.streamChatProvider = {
+                flowOf(GenerateEvent.Error("native stopped", RuntimeStats(lastError = "native stopped")))
+            }
+            val body = """{"model":"active-model","messages":[{"role":"user","content":"hi"}],"stream":true}"""
+            val response = rawHttp(
+                port,
+                "POST /v1/chat/completions HTTP/1.1\r\n" +
+                    "Host: 127.0.0.1\r\n" +
+                    "Authorization: Bearer secret\r\n" +
+                    "Content-Type: application/json\r\n" +
+                    "Content-Length: ${body.toByteArray().size}\r\n\r\n" +
+                    body
+            )
+
+            assertTrue(response.startsWith("HTTP/1.1 200 OK"))
+            assertTrue(response.contains("native stopped"))
+            assertTrue(response.contains("data: [DONE]"))
+            assertFalse(response.contains("\"finish_reason\":\"stop\""))
+        }
+    }
+
+    @Test
+    fun nonStreamingLoadBoundErrorReturnsStructuredConflict() {
+        withServer(apiKey = "secret") { port ->
+            LocalApiRuntime.streamChatProvider = {
+                flowOf(
+                    GenerateEvent.Error(
+                        message = "本次请求修改了需要重新加载模型的参数，请先应用参数并重新加载模型。",
+                        stats = RuntimeStats(),
+                        code = "model_reload_required",
+                        changedFields = setOf("n_ctx"),
+                        action = "apply_and_reload"
+                    )
+                )
+            }
+            val body = """{"model":"active-model","messages":[{"role":"user","content":"hi"}]}"""
+            val response = rawHttp(
+                port,
+                "POST /v1/chat/completions HTTP/1.1\r\n" +
+                    "Host: 127.0.0.1\r\n" +
+                    "Authorization: Bearer secret\r\n" +
+                    "Content-Type: application/json\r\n" +
+                    "Content-Length: ${body.toByteArray().size}\r\n\r\n" +
+                    body
+            )
+
+            assertTrue(response.startsWith("HTTP/1.1 409 Conflict"))
+            assertTrue(response.contains("model_reload_required"))
+            assertTrue(response.contains("apply_and_reload"))
+            assertTrue(response.contains("changedFields"))
+            assertTrue(response.contains("n_ctx"))
+            assertFalse(response.contains("Load-bound request fields"))
+        }
+    }
+
+    @Test
+    fun streamingChatClosesWithDoneForEmptyProviderFlow() {
+        withServer(apiKey = "secret") { port ->
+            LocalApiRuntime.streamChatProvider = { emptyFlow() }
+            val body = """{"model":"active-model","messages":[{"role":"user","content":"hi"}],"stream":true}"""
+            val response = rawHttp(
+                port,
+                "POST /v1/chat/completions HTTP/1.1\r\n" +
+                    "Host: 127.0.0.1\r\n" +
+                    "Authorization: Bearer secret\r\n" +
+                    "Content-Type: application/json\r\n" +
+                    "Content-Length: ${body.toByteArray().size}\r\n\r\n" +
+                    body
+            )
+
+            assertTrue(response.startsWith("HTTP/1.1 200 OK"))
+            assertTrue(response.contains("data: [DONE]"))
+        }
+    }
+
+    @Test
+    fun stoppedStreamingChatClosesWithStopFrameAndDone() {
+        val firstChunkDelivered = CountDownLatch(1)
+        val providerCancelled = CountDownLatch(1)
+        val streamResponse = AtomicReference<String>()
+        withServer(apiKey = "secret") { port ->
+            LocalApiRuntime.streamChatProvider = {
+                flow {
+                    emit(GenerateEvent.Chunk(text = "stop-me", stats = RuntimeStats(completionTokens = 1)))
+                    firstChunkDelivered.countDown()
+                    try {
+                        awaitCancellation()
+                    } finally {
+                        providerCancelled.countDown()
+                    }
+                }
+            }
+            val requestThread = Thread {
+                runCatching {
+                    streamResponse.set(
+                        rawHttp(
+                            port,
+                            chatRequest(
+                                """{"model":"active-model","messages":[{"role":"user","content":"stop"}],"stream":true}"""
+                            ).replace(
+                                "Host: 127.0.0.1\r\n",
+                                "Host: 127.0.0.1\r\nX-MCA-Request-Id: sse-stop-1\r\n"
+                            )
+                        )
+                    )
+                }
+            }.apply { start() }
+
+            assertTrue(firstChunkDelivered.await(5, TimeUnit.SECONDS))
+            val stopResponse = rawHttp(
+                port,
+                authenticatedPost("/v1/generate/stop", body = """{"request_id":"sse-stop-1"}""")
+            )
+
+            assertTrue(stopResponse.startsWith("HTTP/1.1 200 OK"))
+            assertTrue(stopResponse.contains("\"stopped\":true"))
+            requestThread.join(5_000L)
+            assertFalse("stopped SSE stream must not hang", requestThread.isAlive)
+            val response = requireNotNull(streamResponse.get())
+            assertTrue(response.startsWith("HTTP/1.1 200 OK"))
+            assertTrue(response.contains("stop-me"))
+            assertTrue(
+                "stopped stream must close with finish_reason:stop",
+                response.contains("\"finish_reason\":\"stop\"")
+            )
+            assertEquals(1, Regex("""data: \[DONE\]""").findAll(response).count())
+            assertTrue(response.trimEnd().endsWith("data: [DONE]"))
+            assertTrue("provider flow should observe cancellation", providerCancelled.await(5, TimeUnit.SECONDS))
+        }
+    }
+
+    @Test
+    fun stoppedStreamingChatWithoutVisibleContentStillWritesTheTerminalFrame() {
+        val providerRunning = CountDownLatch(1)
+        val streamResponse = AtomicReference<String>()
+        withServer(apiKey = "secret") { port ->
+            LocalApiRuntime.streamChatProvider = {
+                flow {
+                    providerRunning.countDown()
+                    awaitCancellation()
+                }
+            }
+            val requestThread = Thread {
+                runCatching {
+                    streamResponse.set(
+                        rawHttp(
+                            port,
+                            chatRequest(
+                                """{"model":"active-model","messages":[{"role":"user","content":"stop-empty"}],"stream":true}"""
+                            ).replace(
+                                "Host: 127.0.0.1\r\n",
+                                "Host: 127.0.0.1\r\nX-MCA-Request-Id: sse-stop-empty\r\n"
+                            )
+                        )
+                    )
+                }
+            }.apply { start() }
+
+            assertTrue(providerRunning.await(5, TimeUnit.SECONDS))
+            val stopResponse = rawHttp(
+                port,
+                authenticatedPost("/v1/generate/stop", body = """{"request_id":"sse-stop-empty"}""")
+            )
+
+            assertTrue(stopResponse.startsWith("HTTP/1.1 200 OK"))
+            requestThread.join(5_000L)
+            assertFalse(requestThread.isAlive)
+            val response = requireNotNull(streamResponse.get())
+            assertFalse(
+                "a user stop is not an empty-visible-output failure",
+                response.contains("generation_empty_visible_output")
+            )
+            assertTrue(response.contains("\"finish_reason\":\"stop\""))
+            assertTrue(response.trimEnd().endsWith("data: [DONE]"))
+        }
+    }
+
+    @Test
+    fun standardChatRouteRejectsEmptyMessagesBeforeProviderExecution() {
+        val calls = AtomicInteger(0)
+        withServer(apiKey = "secret") { port ->
+            LocalApiRuntime.streamChatProvider = {
+                calls.incrementAndGet()
+                error("provider must not run")
+            }
+            val response = rawHttp(
+                port,
+                authenticatedPost(
+                    "/v1/chat/completions",
+                    body = """{"model":"active-model","messages":[],"stream":false}"""
+                )
+            )
+            assertTrue(response.startsWith("HTTP/1.1 400 Bad Request"))
+            assertTrue(response.contains("\"param\":\"messages\""))
+            assertEquals(0, calls.get())
+        }
+    }
+
+    @Test
+    fun responsesRouteSupportsNonStreamingAndStreamingRequests() {
+        withServer(apiKey = "secret") { port ->
+            LocalApiRuntime.streamChatProvider = {
+                flowOf(
+                    GenerateEvent.Chunk("responses ok", RuntimeStats(promptTokens = 3, completionTokens = 2)),
+                    GenerateEvent.Done(RuntimeStats(promptTokens = 3, completionTokens = 2))
+                )
+            }
+            val body = """{"model":"active-model","input":"hello","stream":false}"""
+            val response = rawHttp(port, authenticatedPost("/v1/responses", body = body))
+            val json = responseJson(response)
+            assertTrue(response.startsWith("HTTP/1.1 200 OK"))
+            assertEquals("response", json.getString("object"))
+            assertEquals("completed", json.getString("status"))
+            assertEquals(
+                "responses ok",
+                json.getJSONArray("output").getJSONObject(0)
+                    .getJSONArray("content").getJSONObject(0).getString("text")
+            )
+
+            val streamResponse = rawHttp(
+                port,
+                authenticatedPost(
+                    "/responses",
+                    body = """{"model":"active-model","input":[{"role":"user","content":[{"type":"input_text","text":"hello"}]}],"stream":true}"""
+                )
+            )
+            assertTrue(streamResponse.startsWith("HTTP/1.1 200 OK"))
+            assertTrue(streamResponse.contains("event: response.output_text.delta"))
+            assertTrue(streamResponse.contains("event: response.completed"))
+            val events = streamResponse.substringAfter("\r\n\r\n")
+                .split("\n\n")
+                .filter { it.startsWith("event: ") }
+                .map { JSONObject(it.substringAfter("data: ").trim()) }
+            assertEquals((0 until events.size).map(Int::toLong), events.map { it.getLong("sequence_number") })
+            assertEquals("response", events.first().getJSONObject("response").getString("object"))
+            assertEquals("message", events.first { it.getString("type") == "response.output_item.added" }
+                .getJSONObject("item").getString("type"))
+            assertEquals("responses ok", events.first { it.getString("type") == "response.output_text.done" }.getString("text"))
+            assertEquals("completed", events.last().getJSONObject("response").getString("status"))
+            assertFalse(streamResponse.contains("data: [DONE]"))
+        }
+    }
+
+    @Test
+    fun responsesRouteRejectsEmptyInputWithBadRequest() {
+        val calls = AtomicInteger(0)
+        withServer(apiKey = "secret") { port ->
+            LocalApiRuntime.streamChatProvider = {
+                calls.incrementAndGet()
+                error("provider must not run")
+            }
+            val response = rawHttp(
+                port,
+                authenticatedPost(
+                    "/v1/responses",
+                    body = """{"model":"active-model","input":[]}"""
+                )
+            )
+            assertTrue(response.startsWith("HTTP/1.1 400 Bad Request"))
+            assertTrue(response.contains("\"param\":\"input\""))
+            assertEquals(0, calls.get())
+        }
+    }
+
+    @Test
+    fun responsesFailureHasOneTypedTerminalAndUnnestedError() {
+        withServer(apiKey = "secret") { port ->
+            LocalApiRuntime.streamChatProvider = {
+                flowOf(
+                    GenerateEvent.Chunk("partial", RuntimeStats()),
+                    GenerateEvent.Error("worker failed", RuntimeStats(), code = "worker_failed"),
+                    GenerateEvent.Chunk("late", RuntimeStats())
+                )
+            }
+            val raw = rawHttp(port, authenticatedPost(
+                "/v1/responses", body = """{"model":"active-model","input":"hi","stream":true}"""
+            ))
+            val events = raw.substringAfter("\r\n\r\n").split("\n\n")
+                .filter { it.startsWith("event: ") }
+                .map { JSONObject(it.substringAfter("data: ").trim()) }
+            assertEquals(1, events.count { it.getString("type") == "response.failed" })
+            assertFalse(raw.contains("response.completed"))
+            assertFalse(raw.contains("late"))
+            val error = events.last().getJSONObject("response").getJSONObject("error")
+            assertFalse(error.has("error"))
+            assertEquals("worker_failed", error.getString("code"))
+            assertEquals(1, Regex("HTTP/1.1").findAll(raw).count())
+        }
+    }
+
+    @Test
+    fun nonStreamingResponsesIgnoresCallbacksAfterTerminalError() {
+        withServer(apiKey = "secret") { port ->
+            LocalApiRuntime.streamChatProvider = {
+                flowOf(
+                    GenerateEvent.Chunk("partial", RuntimeStats()),
+                    GenerateEvent.Error("native failed", RuntimeStats(), code = "native_failed"),
+                    GenerateEvent.Chunk("late content", RuntimeStats()),
+                    GenerateEvent.Done(RuntimeStats())
+                )
+            }
+            val response = rawHttp(port, authenticatedPost(
+                "/v1/responses", body = """{"model":"active-model","input":"hi","stream":false}"""
+            ))
+            assertTrue(response.startsWith("HTTP/1.1 500 Internal Server Error"))
+            assertTrue(response.contains("native_failed"))
+            assertFalse(response.contains("late content"))
+            assertEquals(1, Regex("HTTP/1.1").findAll(response).count())
+        }
+    }
+
+    @Test
+    fun staleScopedStopDoesNotCancelNewRequestOrUseGlobalStop() {
+        val started = CountDownLatch(1)
+        val cancelled = CountDownLatch(1)
+        val globalStopCalls = AtomicInteger(0)
+        val scopedStops = mutableListOf<String>()
+        withServer(apiKey = "secret") { port ->
+            LocalApiRuntime.streamChatWithContextProvider = { _, _ ->
+                flow {
+                    started.countDown()
+                    try { awaitCancellation() } finally { cancelled.countDown() }
+                }
+            }
+            LocalApiRuntime.stopGenerationProvider = { globalStopCalls.incrementAndGet() }
+            LocalApiRuntime.stopGenerationIfRequestActiveProvider = { requestId ->
+                scopedStops += requestId
+                true
+            }
+            val body = """{"model":"active-model","input":"hi","stream":true}"""
+            val requestThread = Thread {
+                runCatching {
+                    rawHttp(port, authenticatedPost("/v1/responses", body = body)
+                        .replace("Host: 127.0.0.1\r\n", "Host: 127.0.0.1\r\nX-MCA-Request-Id: client-new\r\n"))
+                }
+            }
+            requestThread.start()
+            try {
+                assertTrue(started.await(5, TimeUnit.SECONDS))
+                val stale = rawHttp(port, authenticatedPost(
+                    "/v1/generate/stop", body = """{"request_id":"client-old"}"""
+                ))
+                assertTrue(stale.startsWith("HTTP/1.1 409 Conflict"))
+                assertEquals(0, globalStopCalls.get())
+                assertTrue(scopedStops.isEmpty())
+                assertEquals(1L, cancelled.count)
+                val matched = rawHttp(port, authenticatedPost(
+                    "/v1/generate/stop", body = """{"request_id":"client-new"}"""
+                ))
+                assertTrue(matched.startsWith("HTTP/1.1 200 OK"))
+                assertTrue(cancelled.await(5, TimeUnit.SECONDS))
+                assertEquals(0, globalStopCalls.get())
+                assertTrue(scopedStops.all { it.startsWith("resp-") })
+            } finally {
+                rawHttp(port, authenticatedPost("/v1/generate/stop"))
+                requestThread.join(5_000L)
+            }
+        }
+    }
+
+    @Test
+    fun repeatedRequestIdOnImagesRouteWritesVisible409Json() {
+        withServer(apiKey = "secret") { port ->
+            val first = rawHttp(
+                port,
+                authenticatedPost("/v1/images/generations", body = """{"prompt":"obs1"}""")
+                    .replace("Host: 127.0.0.1\r\n", "Host: 127.0.0.1\r\nX-MCA-Request-Id: obs1-images\r\n")
+            )
+            assertTrue(first.startsWith("HTTP/1.1 503 Service Unavailable"))
+
+            val duplicate = rawHttp(
+                port,
+                authenticatedPost("/v1/images/generations", body = """{"prompt":"obs1"}""")
+                    .replace("Host: 127.0.0.1\r\n", "Host: 127.0.0.1\r\nX-MCA-Request-Id: obs1-images\r\n")
+            )
+            // OBS-1: this rejection used to escape handle() through the closing socket wrapper, so
+            // the client read a zero-byte FIN instead of the JSON below.
+            assertTrue("duplicate response bytes=${duplicate.length}", duplicate.startsWith("HTTP/1.1 "))
+            assertTrue(duplicate.startsWith("HTTP/1.1 409 Conflict"))
+            assertEquals(
+                "request_id_conflict",
+                responseJson(duplicate).getJSONObject("error").getString("code")
+            )
+            assertTrue(duplicate.contains("Content-Length: 138\r\n"))
+            val headerEnd = duplicate.indexOf("\r\n\r\n")
+            assertTrue(headerEnd >= 0)
+            assertEquals(138, duplicate.substring(headerEnd + 4).toByteArray(Charsets.UTF_8).size)
+            assertEquals(652, duplicate.toByteArray(Charsets.UTF_8).size)
+
+            // The same consumed id is also rejected before the third request-id call site runs.
+            val crossRoute = rawHttp(
+                port,
+                authenticatedPost("/v1/chat/completions", body = """{"model":"active-model","messages":[]}""")
+                    .replace("Host: 127.0.0.1\r\n", "Host: 127.0.0.1\r\nX-MCA-Request-Id: obs1-images\r\n")
+            )
+            assertTrue(crossRoute.startsWith("HTTP/1.1 409 Conflict"))
+            assertEquals(
+                "request_id_conflict",
+                responseJson(crossRoute).getJSONObject("error").getString("code")
+            )
+        }
+    }
+
+    @Test
+    fun invalidRequestIdOnResponsesRouteWritesVisible400Json() {
+        withServer(apiKey = "secret") { port ->
+            LocalApiRuntime.streamChatProvider = { error("provider must not run") }
+            val response = rawHttp(
+                port,
+                authenticatedPost("/v1/responses", body = """{"model":"active-model","input":"hi"}""")
+                    .replace("Host: 127.0.0.1\r\n", "Host: 127.0.0.1\r\nX-MCA-Request-Id: obs1-bad!\r\n")
+            )
+            assertTrue("rejection response bytes=${response.length}", response.startsWith("HTTP/1.1 "))
+            assertTrue(response.startsWith("HTTP/1.1 400 Bad Request"))
+            assertEquals(
+                "invalid_request_id",
+                responseJson(response).getJSONObject("error").getString("code")
+            )
+            assertEquals(660, response.toByteArray(Charsets.UTF_8).size)
+        }
+    }
+
+    @Test
+    fun streamingReadyMnnVisionRequestDoesNotRequireLocalCertification() {
+        val calls = AtomicInteger(0)
+        withServer(apiKey = "secret") { port ->
+            LocalApiRuntime.loadedModelJsonProvider = {
+                """{"id":"qwen35-mnn","displayName":"通义千问 3.5-0.8B MNN","runtime":"mnn","vision_validated":false,"stats":{"backend":"mnn_cpu","visionReady":true}}"""
+            }
+            LocalApiRuntime.modelsJsonProvider = {
+                """{"object":"list","data":[{"id":"qwen35-mnn","runtime":"mnn","vision_ready":true,"vision_validated":false}]}"""
+            }
+            LocalApiRuntime.streamChatProvider = {
+                calls.incrementAndGet()
+                flowOf(
+                    GenerateEvent.Chunk(text = "mnn vision open", stats = RuntimeStats(completionTokens = 1)),
+                    GenerateEvent.Done(RuntimeStats(completionTokens = 1))
+                )
+            }
+            val body = imageChatBody(stream = true)
+            val response = rawHttp(port, chatRequest(body))
+
+            assertTrue(response.startsWith("HTTP/1.1 200 OK"))
+            assertTrue(response.contains("mnn vision open"))
+            assertTrue(response.contains("data: [DONE]"))
+            assertEquals(1, calls.get())
+        }
+    }
+
+    @Test
+    fun nonStreamingReadyMnnVisionRequestDoesNotRequireLocalCertification() {
+        val calls = AtomicInteger(0)
+        withServer(apiKey = "secret") { port ->
+            LocalApiRuntime.loadedModelJsonProvider = {
+                """{"id":"qwen35-mnn","displayName":"通义千问 3.5-0.8B MNN","runtime":"mnn","vision_validated":false,"stats":{"backend":"mnn_cpu","visionReady":true}}"""
+            }
+            LocalApiRuntime.streamChatProvider = {
+                calls.incrementAndGet()
+                flowOf(
+                    GenerateEvent.Chunk(text = "mnn vision open", stats = RuntimeStats(completionTokens = 1)),
+                    GenerateEvent.Done(RuntimeStats(completionTokens = 1))
+                )
+            }
+            val body = imageChatBody(stream = false)
+            val response = rawHttp(port, chatRequest(body))
+
+            assertTrue(response.startsWith("HTTP/1.1 200 OK"))
+            assertTrue(response.contains("mnn vision open"))
+            assertEquals(1, calls.get())
+        }
+    }
+
+    @Test
+    fun mnnVisionRequestWithoutVisualComponentReturnsModelSpecificNotReadyError() {
+        val calls = AtomicInteger(0)
+        withServer(apiKey = "secret") { port ->
+            LocalApiRuntime.loadedModelJsonProvider = {
+                """{"id":"qwen35-mnn-text","displayName":"通义千问 3.5-2B MNN","runtime":"mnn","vision_validated":false,"stats":{"backend":"mnn_cpu","visionReady":false}}"""
+            }
+            LocalApiRuntime.streamChatProvider = {
+                calls.incrementAndGet()
+                flowOf(GenerateEvent.Chunk(text = "should not run", stats = RuntimeStats(completionTokens = 1)))
+            }
+            val body = imageChatBody(stream = true)
+            val response = rawHttp(port, chatRequest(body))
+
+            assertTrue(response.startsWith("HTTP/1.1 409 Conflict"))
+            assertTrue(response.contains("\"code\":\"mnn_vision_not_ready\""))
+            assertTrue(response.contains("通义千问 3.5-2B MNN"))
+            assertFalse(response.contains("Content-Type: text/event-stream"))
+            assertFalse(response.contains("data: [DONE]"))
+            assertFalse(response.contains("should not run"))
+            assertEquals(0, calls.get())
+        }
+    }
+
+    @Test
+    fun validatedMnnVisionRequestPassesToProvider() {
+        val calls = AtomicInteger(0)
+        withServer(apiKey = "secret") { port ->
+            LocalApiRuntime.loadedModelJsonProvider = {
+                """{"id":"mnn-validated","displayName":"MNN 图文验证模型","runtime":"mnn","vision_ready":true,"vision_validated":true,"stats":{"backend":"mnn_cpu","visionReady":true}}"""
+            }
+            LocalApiRuntime.modelsJsonProvider = {
+                """{"object":"list","data":[{"id":"mnn-validated","runtime":"mnn","vision_ready":true,"vision_validated":true}]}"""
+            }
+            LocalApiRuntime.streamChatProvider = {
+                calls.incrementAndGet()
+                flowOf(
+                    GenerateEvent.Chunk(text = "mnn vision ok", stats = RuntimeStats(completionTokens = 2)),
+                    GenerateEvent.Done(RuntimeStats(completionTokens = 2))
+                )
+            }
+
+            val response = rawHttp(port, chatRequest(imageChatBody(stream = true)))
+
+            assertTrue(response.startsWith("HTTP/1.1 200 OK"))
+            assertTrue(response.contains("mnn vision ok"))
+            assertTrue(response.contains("data: [DONE]"))
+            assertEquals(1, calls.get())
+        }
+    }
+
+    @Test
+    fun textOnlyMnnRequestStillStreamsNormally() {
+        val calls = AtomicInteger(0)
+        withServer(apiKey = "secret") { port ->
+            LocalApiRuntime.loadedModelJsonProvider = {
+                """{"id":"qwen35-mnn","runtime":"mnn","stats":{"backend":"mnn_cpu","visionReady":true}}"""
+            }
+            LocalApiRuntime.streamChatProvider = {
+                calls.incrementAndGet()
+                flowOf(
+                    GenerateEvent.Chunk(text = "mnn text ok", stats = RuntimeStats(completionTokens = 3)),
+                    GenerateEvent.Done(RuntimeStats(completionTokens = 3))
+                )
+            }
+            val body = """{"model":"active-model","messages":[{"role":"user","content":"hi"}],"stream":true}"""
+            val response = rawHttp(port, chatRequest(body))
+
+            assertTrue(response.startsWith("HTTP/1.1 200 OK"))
+            assertTrue(response.contains("mnn text ok"))
+            assertTrue(response.contains("data: [DONE]"))
+            assertEquals(1, calls.get())
+        }
+    }
+
+    @Test
+    fun miniCpmVisionRequestStillPassesToProvider() {
+        val calls = AtomicInteger(0)
+        withServer(apiKey = "secret") { port ->
+            LocalApiRuntime.loadedModelJsonProvider = {
+                """{"id":"minicpm-v","displayName":"MiniCPM-V 4.6 Q4_K_M","runtime":"llama_cpp","vision_ready":true,"vision_validated":true,"stats":{"backend":"llama_cpp","visionReady":true}}"""
+            }
+            LocalApiRuntime.streamChatProvider = {
+                calls.incrementAndGet()
+                flowOf(
+                    GenerateEvent.Chunk(text = "vision ok", stats = RuntimeStats(completionTokens = 2)),
+                    GenerateEvent.Done(RuntimeStats(completionTokens = 2))
+                )
+            }
+            val body = imageChatBody(stream = true)
+            val response = rawHttp(port, chatRequest(body))
+
+            assertTrue(response.startsWith("HTTP/1.1 200 OK"))
+            assertTrue(response.contains("vision ok"))
+            assertTrue(response.contains("data: [DONE]"))
+            assertEquals(1, calls.get())
+        }
+    }
+
+    private fun withServer(apiKey: String, block: (Int) -> Unit) =
+        withServerInstance(apiKey) { _, port -> block(port) }
+
+    private fun withServerInstance(
+        apiKey: String,
+        block: (McaLoopbackServer, Int) -> Unit
+    ) {
+        val port = freePort()
+        val server = McaLoopbackServer(port = port, bindHost = "127.0.0.1", apiKey = apiKey)
+        try {
+            server.clearProcessIdempotencyCacheForTests()
+            resetLocalApiRuntimeForTests()
+            server.start()
+            block(server, port)
+        } finally {
+            server.shutdown()
+            resetLocalApiRuntimeForTests()
+        }
+    }
+
+    private fun resetLocalApiRuntimeForTests() {
+        LocalApiRuntime.nativeStatsJsonProvider = null
+        LocalApiRuntime.streamChatProvider = null
+        LocalApiRuntime.streamChatWithContextProvider = null
+        LocalApiRuntime.stopGenerationProvider = null
+        LocalApiRuntime.stopGenerationIfRequestActiveProvider = null
+        LocalApiRuntime.imageGenerationProvider = null
+        LocalApiRuntime.controlPlane = null
+        LocalApiRuntime.clearRequestTrace()
+        LocalApiRuntime.loadedModelJsonProvider = { "{}" }
+        LocalApiRuntime.paramsJsonProvider = { "{}" }
+        LocalApiRuntime.generationParamsProvider = { GenerationParams() }
+        LocalApiRuntime.modelsJsonProvider = { """{"object":"list","data":[]}""" }
+        LocalApiRuntime.imageTextualInversionsJsonProvider = { "[]" }
+        LocalApiRuntime.modelRuntimeStatesJsonProvider = { "{}" }
+        LocalApiRuntime.deviceProfileJsonProvider = { "{}" }
+        LocalApiRuntime.agentRecommendationJsonProvider = { "{}" }
+        LocalApiRuntime.benchmarkJsonProvider = { "{}" }
+    }
+
+    private fun chatRequest(body: String): String =
+        "POST /v1/chat/completions HTTP/1.1\r\n" +
+            "Host: 127.0.0.1\r\n" +
+            "Authorization: Bearer secret\r\n" +
+            "Content-Type: application/json\r\n" +
+            "Content-Length: ${testChatBodyWithDefaultModel(body).toByteArray().size}\r\n\r\n" +
+            testChatBodyWithDefaultModel(body)
+
+    private fun testChatBodyWithDefaultModel(body: String): String = runCatching {
+        val root = JSONObject(body)
+        if (!root.has("model")) root.put("model", "active-model")
+        root.toString()
+    }.getOrDefault(body)
+
+    private fun authenticatedGet(path: String): String =
+        "GET $path HTTP/1.1\r\n" +
+            "Host: 127.0.0.1\r\n" +
+            "Authorization: Bearer secret\r\n\r\n"
+
+    private fun authenticatedPost(
+        path: String,
+        idempotencyKey: String? = null,
+        body: String = ""
+    ): String =
+        buildString {
+            append("POST $path HTTP/1.1\r\n")
+            append("Host: 127.0.0.1\r\n")
+            append("Authorization: Bearer secret\r\n")
+            idempotencyKey?.let { append("Idempotency-Key: $it\r\n") }
+            if (body.isNotEmpty()) append("Content-Type: application/json\r\n")
+            append("Content-Length: ${body.toByteArray(Charsets.UTF_8).size}\r\n\r\n")
+            append(body)
+        }
+
+    private fun imageChatBody(stream: Boolean): String =
+        """{"model":"active-model","messages":[{"role":"user","content":[{"type":"text","text":"describe"},{"type":"image_url","image_url":{"url":"data:image/png;base64,AAAA"}}]}],"stream":$stream}"""
+
+    private fun directPromptProcessing(requestBody: String): JSONObject {
+        val request = ImageGenerationApiContract.parseRequest(requestBody)
+        return JSONObject()
+            .put("version", 4)
+            .put("originalPrompt", request.prompt)
+            .put("effectivePrompt", request.prompt)
+            .put("originalNegativePrompt", request.negativePrompt ?: JSONObject.NULL)
+            .put("effectiveNegativePrompt", request.negativePrompt.orEmpty())
+            .put("negativePromptSource", if (request.negativePrompt == null) "EMPTY" else "USER")
+            .put("method", "DIRECT")
+            .put("imageProfileBindingFingerprint", "a".repeat(64))
+            .put("promptLanguageBindingFingerprint", "c".repeat(64))
+    }
+
+    private fun JSONObject.bindPromptExecution(
+        requestBody: String,
+        effectivePrompt: String? = null,
+        effectiveNegativePrompt: String? = null,
+        languageCapability: String = "ENGLISH_DOMINANT"
+    ): JSONObject {
+        val request = ImageGenerationApiContract.parseRequest(requestBody)
+        val promptSha256 = imagePromptExecutionSha256(
+            effectivePrompt ?: request.prompt,
+            (effectiveNegativePrompt ?: request.negativePrompt).orEmpty()
+        )
+        getJSONObject("nativeEffective")
+            .put("nativePromptExecutionSha256", promptSha256)
+            .put("nativePromptBindingStage", "conditioning_consumed")
+        return put("imageProfileBindingFingerprint", "a".repeat(64))
+            .put("promptLanguageBindingFingerprint", "c".repeat(64))
+            .put("textEncoderLanguageCapability", languageCapability)
+            .put("promptExecutionSha256", promptSha256)
+            .put("nativePromptExecutionSha256", promptSha256)
+            .put("nativePromptBindingStage", "conditioning_consumed")
+    }
+
+    private fun strictImageExecution(runtime: String): JSONObject {
+        val nativePromptSha256 = imagePromptExecutionSha256("fixture prompt", "")
+        val nativeEffective = JSONObject()
+            .put("profileId", "profile.image.v1")
+            .put("profileRevision", 3)
+            .put("modelFingerprint", "sha256:abc")
+            .put("runtime", runtime)
+            .put("taskMode", "text_to_image")
+            .put("scheduler", "dpmpp_2m")
+            .put("predictionType", "epsilon")
+            .put("steps", 20)
+            .put("timetableCount", 20)
+            .put("unetExecutionCount", 40)
+            .put("cfgScale", 7.0)
+            .put("useCfg", true)
+            .put("unconditionalBranch", true)
+            .put("tokenizerBackend", "TOKENIZERS_CPP")
+            .put("tokenCount", 154)
+            .put("promptWeightingSupported", false)
+            .put("promptWeightingApplied", false)
+            .put("positiveWeightedTokenCount", 0)
+            .put("negativeWeightedTokenCount", 0)
+            .put("promptWeightFingerprint", "9b353b1ac542678089ce3d12ee96ddd6ba3b0252ec0675cdf0540e6aa6b1860e")
+            .put("nativePromptExecutionSha256", nativePromptSha256)
+            .put("nativePromptBindingStage", "conditioning_consumed")
+            .put("embeddingDiskDataType", "GRAPH_INTERNAL")
+            .put("vaeScalingLocation", "GRAPH_INTERNAL")
+            .put("vaeScalingFactor", 0.18215)
+            .put("width", 512)
+            .put("height", 512)
+            .put("seed", 20260717)
+            .put("batchCount", 1)
+            .put("graphName", "model")
+            .put("fallback", false)
+        if (runtime == "STABLE_DIFFUSION_CPP") {
+            nativeEffective
+                .put("outputCount", 1)
+                .put("n", 1)
+                .put("samplingPassCount", 1)
+                .put("totalUnetExecutionCount", 40)
+        }
+        return JSONObject(nativeEffective.toString())
+            .put("nativeEffective", nativeEffective)
+            .put("taskMode", "text_to_image")
+            .put("backend", if (runtime == "QNN_HTP") "qnn_htp" else "native")
+            .put("nativeGenerationSequence", 44L)
+            .put("workerPid", 4321)
+            .put("nativeExecution", true)
+            .put("batchCount", 1)
+            .put("fallback", false)
+            .put("npuActive", runtime == "QNN_HTP")
+            .put("qnnGraphExecution", runtime == "QNN_HTP")
+            .put("outputBytes", 1024L)
+            .put("responseOutputEvidence", responseOutputEvidence(imageData()))
+            .apply {
+                if (runtime == "STABLE_DIFFUSION_CPP") {
+                    put("actualSamplingPassCount", 1)
+                    put("actualSamplingStepCount", 20)
+                    put("actualDiffusionModelComputeCount", 40)
+                }
+            }
+    }
+
+    private fun strictControlImageExecution(): JSONObject {
+        val sha = "b".repeat(64)
+        val execution = strictImageExecution("QNN_HTP")
+            .put("taskMode", "control")
+        execution.getJSONObject("nativeEffective")
+            .put("taskMode", "control")
+            .put("batchCount", 1)
+            .put("inputImageExecutionCount", 0)
+            .put("maskImageExecutionCount", 0)
+            .put("controlImageExecutionCount", 1)
+            .put("controlImageSha256", sha)
+            .put("controlStrength", 0.8)
+        return execution.put(
+            "imageInput",
+            JSONObject()
+                .put("nativeExecution", true)
+                .put("taskMode", "control")
+                .put("batchCount", 1)
+                .put("inputImageExecutionCount", 0)
+                .put("maskImageExecutionCount", 0)
+                .put("controlImageExecutionCount", 1)
+                .put("controlImage", JSONObject().put("sha256", sha))
+                .put("controlStrength", 0.8)
+        )
+    }
+
+    private fun imageData(): org.json.JSONArray =
+        org.json.JSONArray().put(
+            JSONObject()
+                .put("index", 0)
+                .put("b64_json", "iVBORw0KGgo=")
+                .put("mime_type", "image/png")
+                .put("width", 512)
+                .put("height", 512)
+                .put("seed", 20260717)
+        )
+
+    private fun responseOutputEvidence(data: JSONArray): JSONArray = JSONArray().apply {
+        for (index in 0 until data.length()) {
+            val item = data.getJSONObject(index)
+            val bytes = Base64.getDecoder().decode(item.getString("b64_json"))
+            val sha256 = MessageDigest.getInstance("SHA-256")
+                .digest(bytes)
+                .joinToString(separator = "") { byte -> "%02x".format(byte.toInt() and 0xff) }
+            put(
+                JSONObject()
+                    .put("index", index)
+                    .put("mimeType", item.getString("mime_type"))
+                    .put("sizeBytes", bytes.size)
+                    .put("sha256", sha256)
+            )
+        }
+    }
+
+    private fun rawHttp(port: Int, request: String): String {
+        Socket("127.0.0.1", port).use { socket ->
+            socket.getOutputStream().write(request.toByteArray(Charsets.UTF_8))
+            socket.getOutputStream().flush()
+            socket.shutdownOutput()
+            return socket.getInputStream().readBytes().toString(Charsets.UTF_8)
+        }
+    }
+
+    private fun responseJson(response: String): JSONObject =
+        JSONObject(response.substringAfter("\r\n\r\n"))
+
+    private fun freePort(): Int = ServerSocket(0).use { it.localPort }
+}

@@ -1,0 +1,93 @@
+package com.muyuchat.mca
+
+import java.io.File
+import org.junit.Assert.assertTrue
+import org.junit.Test
+
+class KnowledgeBaseImportUxContractTest {
+    @Test
+    fun knowledgeImportTracksProgressAndActivatesTheImportedBase() {
+        val source = documentImportCoordinatorSource()
+        val body = functionBody(source, "importKnowledgeDocument")
+        val confirm = functionBody(source, "confirmKnowledgeDocumentImport")
+
+        assertTrue(body.contains("knowledgeBaseImportingIds"))
+        assertTrue(body.contains("stageContentImportPreview(preview)"))
+        assertTrue(confirm.contains("knowledgeDocumentCounts"))
+        assertTrue(confirm.contains("selectedKnowledgeBaseIds = if (ownerIsCurrent) current.selectedKnowledgeBaseIds + baseId"))
+        assertTrue(confirm.contains("chatSessionStore.save(snapshot.chatSessions, bindings)"))
+    }
+
+    @Test
+    fun oversizedInlineFileGetsKnowledgeBaseRecoveryAdvice() {
+        val body = functionBody(chatWorkflowCoordinatorSource(), "sendPreparedMessageAsync")
+
+        assertTrue(body.contains("FILE_ATTACHMENT_MARKER"))
+        assertTrue(body.contains("请将长文件导入知识库后再提问"))
+    }
+
+    private fun chatWorkflowCoordinatorSource(): String {
+        var root = File(requireNotNull(System.getProperty("user.dir"))).canonicalFile
+        repeat(6) {
+            listOf(
+                File(root, "src/main/java/com/muyuchat/mca/ChatWorkflowCoordinator.kt"),
+                File(root, "app/src/main/java/com/muyuchat/mca/ChatWorkflowCoordinator.kt")
+            ).firstOrNull(File::isFile)?.let { return it.readText(Charsets.UTF_8) }
+            root = root.parentFile ?: return@repeat
+        }
+        error("Unable to locate ChatWorkflowCoordinator.kt")
+    }
+
+    private fun mainViewModelSource(): String {
+        var root = File(requireNotNull(System.getProperty("user.dir"))).canonicalFile
+        repeat(6) {
+            listOf(
+                File(root, "src/main/java/com/muyuchat/mca/MainViewModel.kt"),
+                File(root, "app/src/main/java/com/muyuchat/mca/MainViewModel.kt")
+            ).firstOrNull(File::isFile)?.let { return it.readText(Charsets.UTF_8) }
+            root = root.parentFile ?: return@repeat
+        }
+        error("Unable to locate MainViewModel.kt")
+    }
+
+    private fun documentImportCoordinatorSource(): String {
+        var root = File(requireNotNull(System.getProperty("user.dir"))).canonicalFile
+        repeat(6) {
+            listOf(
+                File(root, "src/main/java/com/muyuchat/mca/DocumentImportCoordinator.kt"),
+                File(root, "app/src/main/java/com/muyuchat/mca/DocumentImportCoordinator.kt")
+            ).firstOrNull(File::isFile)?.let { return it.readText(Charsets.UTF_8) }
+            root = root.parentFile ?: return@repeat
+        }
+        error("Unable to locate DocumentImportCoordinator.kt")
+    }
+
+    private fun contentImportPreviewCoordinatorSource(): String {
+        var root = File(requireNotNull(System.getProperty("user.dir"))).canonicalFile
+        repeat(6) {
+            listOf(
+                File(root, "src/main/java/com/muyuchat/mca/ContentImportPreviewCoordinator.kt"),
+                File(root, "app/src/main/java/com/muyuchat/mca/ContentImportPreviewCoordinator.kt")
+            ).firstOrNull(File::isFile)?.let { return it.readText(Charsets.UTF_8) }
+            root = root.parentFile ?: return@repeat
+        }
+        error("Unable to locate ContentImportPreviewCoordinator.kt")
+    }
+
+    private fun functionBody(source: String, functionName: String): String {
+        val declaration = source.indexOf("fun $functionName")
+        assertTrue("Missing $functionName", declaration >= 0)
+        val openingBrace = source.indexOf('{', declaration)
+        var depth = 0
+        for (index in openingBrace until source.length) {
+            when (source[index]) {
+                '{' -> depth++
+                '}' -> {
+                    depth--
+                    if (depth == 0) return source.substring(openingBrace + 1, index)
+                }
+            }
+        }
+        error("Unterminated $functionName")
+    }
+}

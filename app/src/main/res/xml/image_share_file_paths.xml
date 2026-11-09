@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<paths xmlns:android="http://schemas.android.com/apk/res/android">
+    <cache-path
+        name="shared_images"
+        path="shared_images/" />
+    <files-path
+        name="generation_inputs"
+        path="image_generation_inputs/" />
+    <files-path
+        name="app_updates"
+        path="updates/" />
+    <!-- DSH diagnostic bundles only: the redacted export directory, never the whole files root. -->
+    <files-path
+        name="dsh_diagnostics"
+        path="dsh/maintenance/diagnostics/" />
+    <!-- Published video media only (V1-04/V1-05): owned MP4 files behind content URIs. -->
+    <files-path
+        name="video_media"
+        path="video/media/" />
+</paths>

@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MuYu-Agent 帮助</title>
+<style>
+  :root{--navy:#0E2A47;--navy-2:#123658;--amber:#F2B45C;--ink:#12202E;--muted:#5A6B7C;--line:#E4EAF0;--bg:#F7F9FC}
+  *{box-sizing:border-box}
+  body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;background:var(--bg);color:var(--ink);-webkit-font-smoothing:antialiased}
+  .wrap{max-width:960px;margin:0 auto;padding:0 20px}
+  header{background:linear-gradient(160deg,var(--navy) 0%,var(--navy-2) 100%);color:#fff;padding:44px 0 52px}
+  .brand{display:flex;align-items:center;gap:14px}
+  .logo{width:46px;height:46px}
+  h1{font-size:26px;margin:0}
+  .tag{margin:6px 0 0;color:#B9CDE0;font-size:13px}
+  nav.tabs{display:flex;gap:6px;margin-top:22px}
+  nav.tabs a{padding:8px 14px;border-radius:999px;text-decoration:none;font-size:13px;color:#CFE0EF;border:1px solid rgba(255,255,255,.18)}
+  nav.tabs a.on{background:rgba(255,255,255,.14);color:#fff}
+  main{margin-top:-26px;padding-bottom:40px}
+  .card{background:#fff;border:1px solid var(--line);border-radius:18px;box-shadow:0 6px 24px rgba(16,42,71,.08);padding:26px}
+  .card + .card{margin-top:18px}
+  h2{font-size:18px;margin:0 0 10px}
+  details{border-top:1px solid var(--line);padding:14px 0}
+  details:first-of-type{border-top:0}
+  summary{cursor:pointer;font-weight:600;font-size:15px;list-style:none}
+  summary::-webkit-details-marker{display:none}
+  summary:before{content:"＋";color:var(--amber);display:inline-block;width:20px}
+  details[open] summary:before{content:"－"}
+  p{margin:10px 0 0;font-size:14px;line-height:1.8;color:var(--muted)}
+  ol,ul{margin:10px 0 0 20px;padding:0;font-size:14px;line-height:1.9;color:var(--muted)}
+  code{background:#F1F5F9;border:1px solid var(--line);border-radius:6px;padding:1px 6px;font-size:12.5px}
+  .note{border-left:3px solid var(--amber);background:#FFF8EC;padding:12px 14px;border-radius:8px;margin-top:14px;font-size:13.5px;color:#6A4A1B;line-height:1.8}
+  footer{padding:34px 0 52px;color:var(--muted);font-size:13px;text-align:center;line-height:1.8}
+</style>
+</head>
+<body>
+<header>
+  <div class="wrap">
+    <div class="brand">
+      <svg class="logo" viewBox="0 0 108 108" aria-hidden="true">
+        <rect width="108" height="108" rx="24" fill="#0E2A47"/>
+        <g transform="translate(54,54) scale(.80) translate(-54,-54)">
+          <path d="M30,62 C30,48 43,40 57,40 C71,40 82,48 82,56 C82,68 69,76 55,76 C42,76 30,70 30,62 Z" fill="#C98B3E"/>
+          <path d="M33,61 C33,49 45,43 57,43 C70,43 79,49 79,56 C79,66 68,73 55,73 C43,73 33,68 33,61 Z" fill="#F2B45C"/>
+          <path d="M41,58 C41,55 44,53 48,53 L66,53 C70,53 73,55 73,58 C73,62 70,64 66,64 L48,64 C44,64 41,62 41,58 Z" fill="#7A4318"/>
+          <circle cx="72" cy="50.75" r="3.2" fill="#7A4318"/>
+        </g>
+      </svg>
+      <div>
+        <h1>帮助与常见问题</h1>
+        <p class="tag">安装、配置、32 位兼容与更新</p>
+      </div>
+    </div>
+    <nav class="tabs">
+      <a href="./index.html">下载</a>
+      <a class="on" href="./help.html">帮助</a>
+    </nav>
+  </div>
+</header>
+
+<main class="wrap">
+  <section class="card">
+    <h2>开始使用</h2>
+    <details open>
+      <summary>第一次打开，怎么开始对话？</summary>
+      <p>两种方式任选其一：</p>
+      <ol>
+        <li><b>云端 API</b>：在设置里填入服务商地址、模型名和 API Key，保存后即可对话。适合所有机型，32 位手机也完全可用。</li>
+        <li><b>本地模型</b>：下载一个 GGUF 模型放入模型库，选择后在本机推理，对话内容不出设备。需要 64 位设备与足够的运行内存。</li>
+      </ol>
+    </details>
+    <details>
+      <summary>在哪里配置 API Key？</summary>
+      <p>进入「设置 → 模型 / API」填写 Base URL、模型名与密钥。密钥只保存在本机应用私有目录，不会上传到任何第三方服务器。</p>
+    </details>
+    <details>
+      <summary>下载的模型放在哪里？</summary>
+      <p>应用内「模型管理 → 导入模型」即可，支持从本地文件导入或从推荐列表下载。模型文件较大，建议在 Wi-Fi 下操作。</p>
+    </details>
+  </section>
+
+  <section class="card">
+    <h2>32 位手机说明</h2>
+    <details open>
+      <summary>32 位（armeabi-v7a）能做什么？</summary>
+      <p>安装包同时提供 64 位和 32 位库，32 位手机会自动使用 32 位版本。界面、会话、云端 API 对话、设置、模型管理均可正常使用，不会因为缺少库而闪退。</p>
+      <div class="note">厂商 NPU 推理库（高通 QNN / 联发科 Neuron / MNN 图像模型）只提供 64 位二进制，因此 32 位设备上这些本地加速项不可用。应用会在「关于」页标注当前运行 ABI 与不可用能力，而不是直接崩溃。</div>
+    </details>
+    <details>
+      <summary>怎么确认自己手机是 32 位还是 64 位？</summary>
+      <p>打开「设置 → 关于」，页面顶部会显示运行 ABI，例如 <code>arm64-v8a · 64 位</code> 或 <code>armeabi-v7a · 32 位</code>。</p>
+    </details>
+  </section>
+
+  <section class="card">
+    <h2>安装与更新问题</h2>
+    <details open>
+      <summary>提示"应用未安装"或"签名不一致"</summary>
+      <p>说明手机上已有一个不同签名的同包名应用。先卸载旧版（卸载会清除应用内数据，重要会话请先导出），再安装新版。</p>
+    </details>
+    <details>
+      <summary>检查更新一直转圈或失败</summary>
+      <p>应用会优先直连 GitHub，再自动回退到国内加速镜像。若网络受限，可先在官网页面手动下载最新安装包覆盖安装。</p>
+    </details>
+    <details>
+      <summary>更新后数据还在吗？</summary>
+      <p>在未卸载的前提下覆盖安装，会话与设置都保留；卸载重装会清空应用数据。</p>
+    </details>
+  </section>
+
+  <section class="card">
+    <h2>反馈</h2>
+    <details open>
+      <summary>遇到问题怎么反馈？</summary>
+      <p>请在 <a href="https://github.com/ETQWFD/MuYu-Agent-App/issues">GitHub Issues</a> 提交，附上机型、系统版本、「关于」页显示的 ABI 与版本号，以及复现步骤。</p>
+    </details>
+    <details>
+      <summary>这个项目和上游是什么关系？</summary>
+      <p>MuYu-Agent 基于上游 MuYu Chat Agent（作者 <a href="https://github.com/lyydfys">lyydfys</a>）二次开发，保留 Apache-2.0 许可与原作者署名，主要改动为品牌、图标、32 位兼容与更新源。</p>
+    </details>
+  </section>
+</main>
+
+<footer>
+  MuYu-Agent · 维护：ET · <a href="https://github.com/ETQWFD/MuYu-Agent-App">github.com/ETQWFD/MuYu-Agent-App</a>
+</footer>
+</body>
+</html>

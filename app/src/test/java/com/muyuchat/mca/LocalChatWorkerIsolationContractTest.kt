@@ -1,0 +1,159 @@
+package com.muyuchat.mca
+
+import com.muyuchat.core.engine.LocalChatRuntime
+import java.io.File
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
+import org.junit.Test
+
+class LocalChatWorkerIsolationContractTest {
+    @Test
+    fun litertNpuSelectionAcceptsAllBackendAliases() {
+        listOf(
+            "{\"backend\":\"npu\"}",
+            "{\"backend_type\":\"npu\"}",
+            "{\"backendType\":\"npu\"}",
+            "{\"advanced_json\":{\"backend_type\":\"npu\"}}"
+        ).forEach { params ->
+            assertEquals(
+                "npu",
+                localChatWorkerOperationTarget(LocalChatRuntime.LITERT_LM, params).backend
+            )
+        }
+    }
+
+    @Test
+    fun ordinaryTextRuntimesUseTheDedicatedProcessAndBinderProxy() {
+        val manifest = sourceFile("app/src/main/AndroidManifest.xml")
+        // The watchdog operation target/policy helpers moved to LocalChatWorkerSupport.kt during the
+        // P7/S28 worker-support extraction. Reading both files keeps the same contract under test --
+        // the assertions below are unchanged.
+        // T4/R7-C10: the watchdog/kill/recovery segment moved to LocalChatWorkerNativeCall.kt;
+        // the union reads the new owner too -- the assertions below are unchanged.
+        // R7-C11/T2B22-T3: the binding/failure/stats helpers moved out of RemoteLocalChatRunner.kt
+        // into their own files; the union below reads them too -- the assertions are unchanged.
+        val service = sourceFile("app/src/main/java/com/muyuchat/mca/LocalChatWorkerService.kt") +
+            sourceFile("app/src/main/java/com/muyuchat/mca/LocalChatWorkerSupport.kt") +
+            sourceFile("app/src/main/java/com/muyuchat/mca/LocalChatWorkerNativeCall.kt")
+        val runners = sourceFile("app/src/main/java/com/muyuchat/mca/IsolatedLocalChatRunners.kt")
+        val client = sourceFile("app/src/main/java/com/muyuchat/mca/RemoteLocalChatRunner.kt") +
+            sourceFile("app/src/main/java/com/muyuchat/mca/RemoteLocalChatRunnerBinding.kt") +
+            sourceFile("app/src/main/java/com/muyuchat/mca/RemoteLocalChatRunnerFailure.kt") +
+            sourceFile("app/src/main/java/com/muyuchat/mca/RemoteLocalChatRunnerStatsPayload.kt")
+        val aidl = sourceFile("app/src/main/aidl/com/muyuchat/mca/ILocalChatWorker.aidl")
+        val transport = sourceFile(
+            "app/src/main/java/com/muyuchat/mca/LocalChatWorkerRequestTransport.kt"
+        )
+
+        assertTrue(manifest.contains("android:name=\".LocalChatWorkerService\""))
+        assertTrue(manifest.contains("android:process=\":local_chat\""))
+        assertTrue(manifest.contains("android:foregroundServiceType=\"specialUse\""))
+        assertTrue(manifest.contains("android:value=\"resident_local_ai_model\""))
+        assertTrue(service.contains("Process.killProcess(Process.myPid())"))
+        assertTrue(service.contains("promoteLoadedModelToForeground()"))
+        assertTrue(service.contains("ServiceCompat.startForeground("))
+        assertTrue(service.contains("leaveLoadedModelForeground()"))
+        assertTrue(service.contains("ServiceCompat.stopForeground("))
+        assertTrue(runners.contains("put(LocalChatRuntime.LLAMA_CPP, llama)"))
+        assertTrue(runners.contains("put(LocalChatRuntime.MNN_CPU, mnn)"))
+        assertTrue(runners.contains("RemoteLocalChatRunner(context, LocalChatRuntime.GENIEX_QAIRT)"))
+        assertTrue(runners.contains("put(LocalChatRuntime.GENIEX_QAIRT, qairt)"))
+        assertTrue(runners.contains("RemoteLocalChatRunner(context, LocalChatRuntime.LITERT_LM)"))
+        assertTrue(runners.contains("put(LocalChatRuntime.LITERT_LM, liteRtLm)"))
+        assertTrue(service.contains("runtime == LocalChatRuntime.GENIEX_QAIRT"))
+        assertTrue(service.contains("runtime == LocalChatRuntime.LITERT_LM"))
+        assertTrue(client.contains("ILocalChatWorker.Stub.asInterface"))
+        assertTrue(client.contains("RemoteLocalChatRunnerException"))
+        assertTrue(aidl.contains("in ParcelFileDescriptor requestPayload"))
+        assertTrue(aidl.contains("oneway void requestStop();"))
+        assertTrue(client.contains("LocalChatWorkerRequestTransport.write"))
+        assertFalse(runners.contains("defaultLocalChatRunners(context)"))
+        assertTrue(runners.contains("RemoteLocalChatRunner(context, LocalChatRuntime.GENIEX_LLAMA_CPP)"))
+        assertTrue(service.contains("defaultLocalChatRunner(runtime, applicationContext)"))
+        assertTrue(service.contains("runners.getOrPut(runtime)"))
+        assertTrue(transport.contains("MAX_MESSAGES_BYTES = 16 * 1024 * 1024"))
+        assertTrue(transport.contains("MAX_PARAMS_BYTES = 1 * 1024 * 1024"))
+        assertTrue(transport.contains("MAX_FIXED_SYSTEM_PROMPT_BYTES = 128 * 1024"))
+        assertTrue(transport.contains("MAX_PAYLOAD_BYTES = 32 * 1024 * 1024"))
+        assertTrue(client.contains("WORKER_SESSION_LOST_FIELD"))
+        assertTrue(service.contains("LocalChatWorkerStageJournal.forContext"))
+        assertTrue(service.contains("recordStageFailure(stage, diagnostic.code)"))
+        assertTrue(service.contains("stage = \"prefill\""))
+        assertTrue(service.contains("stage = \"load\""))
+        assertTrue(service.contains("guarded(\"decode\", recordStage = recordDecodeStart)"))
+        assertTrue(client.contains("workerFailure(\"process exited unexpectedly.\")"))
+        assertTrue(client.contains("WORKER_STAGE_JOURNAL_FIELD"))
+        assertTrue(client.contains("Last durable worker diagnostic"))
+        assertTrue(aidl.contains("oneway void shutdown()"))
+        assertTrue(service.contains("ConcurrentHashMap<Long, Runnable>"))
+        assertTrue(service.contains("localChatWorkerOperationPolicy"))
+        val loadBody = functionBody(service, "override fun loadModel(")
+        assertTrue(loadBody.contains("operationTarget = loadTarget"))
+        assertTrue(service.contains("mnn_opencl_prefill_timeout"))
+        assertTrue(service.contains("litert_gpu_prefill_timeout"))
+        assertTrue(service.contains("scheduleForcedRecoveryAfterStop"))
+        val stopBody = functionBody(service, "override fun requestStop()")
+        assertTrue(stopBody.contains("dispatchRunnerStop()"))
+        assertTrue(stopBody.indexOf("scheduleForcedRecoveryAfterStop()") < stopBody.indexOf("dispatchRunnerStop()"))
+        assertFalse(stopBody.contains("activeRunner?.requestStop()"))
+        assertTrue(aidl.contains("void resetPrefillProgress()"))
+        assertTrue(service.contains("override fun resetPrefillProgress()"))
+        assertTrue(client.contains("service.resetPrefillProgress()"))
+        assertTrue(
+            client.indexOf("catch (error: DeadObjectException)") <
+                client.indexOf("catch (error: RemoteException)")
+        )
+    }
+
+    @Test
+    fun litertCpuKeepsLongOperationBudgetButRecoversAStuckCancellation() {
+        val target = localChatWorkerOperationTarget(
+            LocalChatRuntime.LITERT_LM,
+            "{\"backend\":\"cpu\"}"
+        )
+        val prefill = localChatWorkerOperationPolicy(target, "prefill")
+        assertEquals(30L * 60L * 1_000L, prefill.timeoutMs)
+        assertTrue(prefill.forceProcessRecoveryOnCancel)
+        assertEquals("litert_cpu_cancel_timeout", prefill.timeoutFailureCode)
+    }
+
+    @Test
+    fun ggufVisionPrefillAndDecodeRecoverWhenNativeCancellationStalls() {
+        listOf(LocalChatRuntime.LLAMA_CPP, LocalChatRuntime.GENIEX_LLAMA_CPP).forEach { runtime ->
+            val target = localChatWorkerOperationTarget(runtime, "{}")
+            listOf("prefill", "decode").forEach { stage ->
+                val policy = localChatWorkerOperationPolicy(target, stage)
+                assertTrue(policy.forceProcessRecoveryOnCancel)
+                assertEquals("gguf_native_timeout", policy.timeoutFailureCode)
+            }
+        }
+    }
+
+    private fun sourceFile(relativePath: String): String {
+        var directory: File? = File(requireNotNull(System.getProperty("user.dir"))).absoluteFile
+        while (directory != null) {
+            val candidate = File(directory, relativePath)
+            if (candidate.isFile) return candidate.readText(Charsets.UTF_8)
+            directory = directory.parentFile
+        }
+        error("Unable to locate source file: $relativePath")
+    }
+
+    private fun functionBody(source: String, signature: String): String {
+        val start = source.indexOf(signature)
+        require(start >= 0) { "Missing function: $signature" }
+        val open = source.indexOf('{', start)
+        var depth = 0
+        for (index in open until source.length) {
+            when (source[index]) {
+                '{' -> depth += 1
+                '}' -> {
+                    depth -= 1
+                    if (depth == 0) return source.substring(start, index + 1)
+                }
+            }
+        }
+        error("Unterminated function: $signature")
+    }
+}

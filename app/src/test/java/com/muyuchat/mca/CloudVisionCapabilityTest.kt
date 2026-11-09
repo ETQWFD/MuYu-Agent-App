@@ -1,0 +1,315 @@
+package com.muyuchat.mca
+
+import android.content.SharedPreferences
+import com.muyuchat.core.engine.ChatImageAttachment
+import com.muyuchat.core.engine.ChatMessage
+import com.muyuchat.core.engine.ChatRequest
+import com.muyuchat.core.engine.GenerationParams
+import com.muyuchat.core.engine.ReasoningMode
+import com.muyuchat.core.engine.Role
+import okhttp3.Request
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
+import org.junit.Test
+import java.lang.reflect.Proxy
+
+class CloudVisionCapabilityTest {
+    @Test
+    fun cloudModelRecordPreservesVisionSupportInChatConfig() {
+        val record = CloudModelRecord(
+            kind = CloudModelKind.CHAT,
+            apiFormat = CloudApiFormat.OPENAI_COMPATIBLE,
+            providerName = "Custom",
+            displayName = "MiMo V2.5",
+            baseUrl = "https://example.com/v1",
+            apiKey = "secret",
+            modelName = "mimo-v2.5",
+            supportsVision = true
+        )
+
+        assertTrue(record.toChatConfig().supportsVision)
+        assertFalse(record.toImageConfig().supportsVision)
+    }
+
+    @Test
+    fun cloudToolCapabilityDefaultsFalseAndPersistsOnlyForChatModels() {
+        val legacyStore = CloudApiStore(memoryPreferences())
+        assertFalse(legacyStore.load().supportsTools)
+        val legacyModelStore = CloudApiStore(
+            memoryPreferences(
+                mapOf(
+                    "cloud_models_json" to """[{"kind":"CHAT","apiFormat":"OPENAI_RESPONSES","modelName":"legacy"}]"""
+                )
+            )
+        )
+        assertFalse(legacyModelStore.loadModels().single().supportsTools)
+
+        val prefs = memoryPreferences()
+        val store = CloudApiStore(prefs)
+        store.save(
+            CloudApiConfig(
+                enabled = true,
+                apiFormat = CloudApiFormat.OPENAI_RESPONSES,
+                baseUrl = "https://example.com/v1",
+                chatModel = "responses-model",
+                supportsTools = true
+            )
+        )
+        assertTrue(store.load().supportsTools)
+
+        val chat = CloudModelRecord(
+            id = "responses-chat",
+            kind = CloudModelKind.CHAT,
+            apiFormat = CloudApiFormat.OPENAI_RESPONSES,
+            providerName = "OpenAI Responses",
+            displayName = "Responses model",
+            baseUrl = "https://example.com/v1",
+            apiKey = "",
+            modelName = "responses-model",
+            supportsTools = true
+        )
+        val image = CloudModelRecord(
+            id = "image-model",
+            kind = CloudModelKind.IMAGE,
+            apiFormat = CloudApiFormat.OPENAI_RESPONSES,
+            providerName = "OpenAI Responses",
+            displayName = "Image model",
+            baseUrl = "https://example.com/v1",
+            apiKey = "",
+            modelName = "image-model",
+            supportsTools = true
+        )
+        store.saveModels(listOf(chat, image))
+
+        val restored = store.loadModels().associateBy { it.id }
+        val restoredChat = requireNotNull(restored[chat.id])
+        val restoredImage = requireNotNull(restored[image.id])
+        assertTrue(restoredChat.supportsTools)
+        assertTrue(restoredChat.toChatConfig().supportsTools)
+        assertFalse(restoredImage.supportsTools)
+        assertFalse(restoredImage.toImageConfig().supportsTools)
+        assertFalse(image.toImageConfig().supportsTools)
+    }
+
+    @Test
+    fun legacyCloudVisionSupportInferenceCoversCommonMultimodalNames() {
+        assertTrue(guessCloudVisionSupport("mimo-v2.5", "https://example.com/v1"))
+        assertTrue(guessCloudVisionSupport("qwen-vl-plus", "https://example.com/v1"))
+        assertTrue(guessCloudVisionSupport("claude-3-5-sonnet-latest", "https://api.anthropic.com/v1"))
+        assertTrue(guessCloudVisionSupport("custom-chat", "https://mimo.mi.com/v1"))
+        assertFalse(guessCloudVisionSupport("qwen3.5-4b-instruct", "https://example.com/v1"))
+    }
+
+    @Test
+    fun mimoCloudRequestsIncludeApiKeyHeaderAlongsideBearer() {
+        val request = Request.Builder()
+            .url("https://mimo.mi.com/v1/chat/completions")
+            .addCloudApiKeyHeaders(
+                CloudApiConfig(
+                    enabled = true,
+                    baseUrl = "https://mimo.mi.com/v1",
+                    apiKey = "secret",
+                    chatModel = "mimo-v2.5"
+                )
+            )
+            .build()
+
+        assertEquals("Bearer secret", request.header("Authorization"))
+        assertEquals("secret", request.header("api-key"))
+    }
+
+    @Test
+    fun coalescingCloudMessagesKeepsImageAttachments() {
+        val image = ChatImageAttachment(
+            name = "photo.png",
+            mimeType = "image/png",
+            dataBase64 = "data:image/png;base64,iVBORw0KGgo="
+        )
+
+        val coalesced = coalesceCloudChatMessagesByRole(
+            listOf(
+                ChatMessage(Role.USER, "First text"),
+                ChatMessage(Role.USER, "Second text", imageAttachments = listOf(image)),
+                ChatMessage(Role.ASSISTANT, "Reply")
+            )
+        )
+
+        assertEquals(2, coalesced.size)
+        assertEquals("First text\n\nSecond text", coalesced.first().content)
+        assertEquals(listOf(image), coalesced.first().imageAttachments)
+    }
+
+    @Test
+    fun coalescingAdjacentUserTurnsDeduplicatesSameImageAcrossMessages() {
+        val bytes = "same-image".toByteArray()
+        val encoded = java.util.Base64.getEncoder().encodeToString(bytes)
+        val first = ChatImageAttachment(
+            name = "first.png",
+            mimeType = "image/png",
+            dataBase64 = encoded
+        )
+        val second = ChatImageAttachment(
+            name = "renamed.png",
+            mimeType = "image/png",
+            dataBase64 = encoded
+        )
+
+        val coalesced = coalesceCloudChatMessagesByRole(
+            listOf(
+                ChatMessage(Role.USER, "first", imageAttachments = listOf(first)),
+                ChatMessage(Role.USER, "retry", imageAttachments = listOf(second)),
+                ChatMessage(Role.ASSISTANT, "reply")
+            )
+        )
+
+        assertEquals(2, coalesced.size)
+        assertEquals(1, coalesced.first().imageAttachments.size)
+    }
+
+    @Test
+    fun openAiCompatibleVisionPayloadUsesImageUrlParts() {
+        val dataUrl = "data:image/png;base64,iVBORw0KGgo="
+        val root = buildOpenAiChatJson(
+            config = CloudApiConfig(
+                enabled = true,
+                apiFormat = CloudApiFormat.OPENAI_COMPATIBLE,
+                baseUrl = "https://openai-compatible.example/v1",
+                chatModel = "mimo-v2.5",
+                supportsVision = true
+            ),
+            request = ChatRequest(
+                messages = listOf(
+                    ChatMessage(
+                        role = Role.USER,
+                        content = "识别这张图片",
+                        imageAttachments = listOf(
+                            ChatImageAttachment(
+                                name = "photo.png",
+                                mimeType = "image/png",
+                                dataBase64 = dataUrl
+                            )
+                        )
+                    )
+                ),
+                params = GenerationParams(systemPrompt = "", reasoningMode = ReasoningMode.OFF)
+            )
+        )
+
+        val messages = root.getJSONArray("messages")
+        val userMessage = (0 until messages.length())
+            .asSequence()
+            .map { messages.getJSONObject(it) }
+            .first { it.getString("role") == "user" }
+        val content = userMessage.getJSONArray("content")
+
+        assertEquals("mimo-v2.5", root.getString("model"))
+        assertEquals("text", content.getJSONObject(0).getString("type"))
+        assertEquals("识别这张图片", content.getJSONObject(0).getString("text"))
+        assertEquals("image_url", content.getJSONObject(1).getString("type"))
+        assertEquals(dataUrl, content.getJSONObject(1).getJSONObject("image_url").getString("url"))
+        assertFalse(root.getBoolean("enable_thinking"))
+    }
+
+    @Test
+    fun anthropicVisionPayloadUsesBase64ImageParts() {
+        val root = buildAnthropicChatJson(
+            config = CloudApiConfig(
+                enabled = true,
+                apiFormat = CloudApiFormat.ANTHROPIC,
+                baseUrl = "https://api.anthropic.com/v1",
+                apiKey = "secret",
+                chatModel = "claude-3-5-sonnet-latest",
+                supportsVision = true
+            ),
+            request = ChatRequest(
+                messages = listOf(
+                    ChatMessage(Role.SYSTEM, "系统设定"),
+                    ChatMessage(
+                        role = Role.USER,
+                        content = "识别这张图片",
+                        imageAttachments = listOf(
+                            ChatImageAttachment(
+                                name = "photo.png",
+                                mimeType = "image/png",
+                                dataBase64 = "data:image/png;base64,iVBORw0KGgo="
+                            )
+                        )
+                    )
+                ),
+                params = GenerationParams(systemPrompt = "", reasoningMode = ReasoningMode.STANDARD)
+            )
+        )
+
+        val messages = root.getJSONArray("messages")
+        val content = messages.getJSONObject(0).getJSONArray("content")
+        val source = content.getJSONObject(0).getJSONObject("source")
+
+        assertTrue(root.getString("system").startsWith("系统设定"))
+        assertEquals("claude-3-5-sonnet-latest", root.getString("model"))
+        assertEquals("user", messages.getJSONObject(0).getString("role"))
+        assertEquals("image", content.getJSONObject(0).getString("type"))
+        assertEquals("base64", source.getString("type"))
+        assertEquals("image/png", source.getString("media_type"))
+        assertEquals("iVBORw0KGgo=", source.getString("data"))
+        assertEquals("text", content.getJSONObject(1).getString("type"))
+        assertEquals("识别这张图片", content.getJSONObject(1).getString("text"))
+        assertEquals("enabled", root.getJSONObject("thinking").getString("type"))
+    }
+
+    @Test
+    fun anthropicPayloadIncludesCharacterMemoryContext() {
+        val root = buildAnthropicChatJson(
+            config = CloudApiConfig(
+                enabled = true,
+                apiFormat = CloudApiFormat.ANTHROPIC,
+                baseUrl = "https://api.anthropic.com/v1",
+                apiKey = "secret",
+                chatModel = "claude-3-5-sonnet-latest"
+            ),
+            request = ChatRequest(
+                messages = listOf(ChatMessage(Role.USER, "Continue the story.")),
+                params = GenerationParams(systemPrompt = "Role: Mira", reasoningMode = ReasoningMode.OFF),
+                runtimeSystemContext = "[Character long-term memory] The north gate is locked."
+            )
+        )
+
+        val system = root.getString("system")
+        assertTrue(system.contains("Role: Mira"))
+        assertTrue(system.contains("The north gate is locked."))
+        assertEquals("user", root.getJSONArray("messages").getJSONObject(0).getString("role"))
+    }
+
+    private fun memoryPreferences(initialValues: Map<String, Any?> = emptyMap()): SharedPreferences {
+        val values = initialValues.toMutableMap()
+        val editor = Proxy.newProxyInstance(
+            javaClass.classLoader,
+            arrayOf(SharedPreferences.Editor::class.java)
+        ) { proxy, method, args ->
+            when {
+                method.name.startsWith("put") -> {
+                    values[args!![0] as String] = args[1]
+                    proxy
+                }
+                method.name == "remove" -> {
+                    values.remove(args!![0] as String)
+                    proxy
+                }
+                method.name == "apply" -> null
+                method.name == "commit" -> true
+                else -> error(method.name)
+            }
+        }
+        return Proxy.newProxyInstance(
+            javaClass.classLoader,
+            arrayOf(SharedPreferences::class.java)
+        ) { _, method, args ->
+            when {
+                method.name == "edit" -> editor
+                method.name == "contains" -> values.containsKey(args!![0] as String)
+                method.name.startsWith("get") -> values[args!![0] as String] ?: args[1]
+                else -> error(method.name)
+            }
+        } as SharedPreferences
+    }
+}

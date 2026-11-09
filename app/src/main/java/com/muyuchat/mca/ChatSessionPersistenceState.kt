@@ -1,0 +1,205 @@
+package com.muyuchat.mca
+
+import com.muyuchat.core.engine.ChatMessage
+import com.muyuchat.core.engine.Role
+import java.util.concurrent.atomic.AtomicLong
+import kotlinx.coroutines.sync.Mutex
+
+/**
+ * R3/C3-S4（插队裁定 3）：会话持久化状态自 MainViewModel 迁出、由组合根持有
+ * （初值来自 VM 首段装配的两段式初始化；VM 以 get/set 别名共享同一实例，读写语义不变）。
+ */
+internal class ChatSessionPersistenceState(
+    initialDurableSessions: List<ChatSessionRecord>
+) {
+    
+    var durableChatSessions: List<ChatSessionRecord> = initialDurableSessions
+
+    val persistenceMutex = Mutex()
+
+    val persistenceSequence = AtomicLong(0L)
+
+    val stateLock = Any()
+
+    val pendingKnowledgeBindings = linkedMapOf<String, Set<String>>()
+
+    // R3/C3-S11：world-book 延迟清理队列（自 VM 迁出，随持久化状态同址）。
+    val pendingWorldBookCleanupOwners =
+        linkedMapOf<WorldBookScope, MutableSet<String>>()
+}
+
+/** R3/C3-S4：`List<ChatSessionRecord>.upsertSession` 类成员体顶层化（体逐字等价；`_uiState.value.assistants` → `state.assistants` 参数化）。 */
+internal fun List<ChatSessionRecord>.upsertSessionFor(
+    state: MainUiState,
+    sessionId: String,
+        messages: List<ChatMessage>,
+        assistantId: String? = null,
+        assistantSnapshot: AssistantConversationSnapshot? = null,
+        replaceAssistantSnapshot: Boolean = false,
+        modelMode: String? = null,
+        modelId: String? = null,
+        // 显式时间输入：高频流式 commit 必须在进入 CAS reducer 之前取好时间，
+        // 避免 reducer 内隐式读时钟导致重试不确定性（硬锁 §6）。
+        occurredAt: Long = System.currentTimeMillis()
+    ): List<ChatSessionRecord> {
+        if (messages.isEmpty()) return this
+        val existing = firstOrNull { it.id == sessionId }
+        val existingOwner = existing?.assistantSnapshot?.assistantId ?: existing?.assistantId
+        if (existing != null && (existing.mixedAssistantHistory ||
+                (assistantId != null && existingOwner != assistantId) ||
+                (assistantSnapshot != null && assistantSnapshot.assistantId != existingOwner))) return this
+        val capturedSnapshot = existing?.assistantSnapshot ?: assistantSnapshot
+            ?: assistantId?.let { owner ->
+                state.assistants.firstOrNull { it.id == owner }?.toConversationSnapshot(occurredAt)
+            }
+        val record = ChatSessionRecord(
+            id = sessionId,
+            // 标题只由「第一条 USER 消息」决定。流式期间追加的是 ASSISTANT 消息，
+            // 首条用户消息不可能变化，因此直接复用已有标题，避免每个 token 重跑
+            // chatTitle() 的 4 次 Regex 构造与行扫描。首条用户消息被编辑时仍会重算。
+            title = when {
+                existing?.manualTitle == true -> existing.title
+                existing != null && existing.messages.hasSameFirstUserMessageAs(messages) -> existing.title
+                else -> messages.chatTitle()
+            },
+            messages = messages,
+            pinned = existing?.pinned ?: false,
+            manualTitle = existing?.manualTitle ?: false,
+            updatedAt = occurredAt,
+            projectId = existing?.projectId,
+            assistantId = existing?.assistantId ?: assistantId,
+            assistantSnapshot = if (replaceAssistantSnapshot) {
+                assistantSnapshot ?: capturedSnapshot
+            } else {
+                capturedSnapshot
+            },
+            mixedAssistantHistory = existing?.mixedAssistantHistory ?: false,
+            modelMode = modelMode ?: existing?.modelMode,
+            modelId = if (modelMode != null) modelId else existing?.modelId,
+            appearanceOverride = existing?.appearanceOverride,
+            contextSummaries = existing?.contextSummaries.orEmpty()
+        )
+        return (listOf(record) + filterNot { it.id == sessionId }).sortedForHistory()
+    }
+
+/**
+ * 标题只由「第一条 USER 消息」决定（见 `chatTitle()`）。
+ * 流式期间追加的是 ASSISTANT 消息，首条用户消息不会变化，因此可以安全复用已有标题；
+ * 首条用户消息被编辑（id 或 content 变化）时返回 false，调用方会重新计算标题。
+ */
+private fun List<ChatMessage>.hasSameFirstUserMessageAs(other: List<ChatMessage>): Boolean {
+    val mine = firstOrNull { it.role == Role.USER }
+    val theirs = other.firstOrNull { it.role == Role.USER }
+    return when {
+        mine == null && theirs == null -> true
+        mine == null || theirs == null -> false
+        else -> mine.id == theirs.id && mine.content == theirs.content
+    }
+}
+
+/** R3/C3-S5：`MainUiState.currentChatModelId()` 顶层化（纯函数，体逐字等价）。 */
+internal fun MainUiState.currentChatModelId(): String? =
+    when (selectedChatBackend) {
+            ChatBackend.LOCAL -> loadedModelId
+            ChatBackend.CLOUD -> selectedCloudChatModelId
+        }
+
+/** R3/C3-S11：`reconciledChatSessionsAfterSave` 顶层化（体逐字等价；持久化状态/会话仓参数化）。 */
+internal fun reconciledChatSessionsAfterSaveFor(
+    persistenceState: ChatSessionPersistenceState,
+    chatSessionStore: ChatSessionStore,
+    snapshot: List<ChatSessionRecord>
+): List<ChatSessionRecord> {
+        val mixedIds = runCatching { chatSessionStore.mixedSessionIds() }.getOrNull() ?: return snapshot
+        val currentById = snapshot.associateBy { it.id }
+        val durableById = persistenceState.durableChatSessions.associateBy { it.id }
+        if (mixedIds.none { id ->
+                currentById[id]?.mixedAssistantHistory != true || currentById[id] != durableById[id]
+            }) return snapshot
+        val persisted = chatSessionStore.load()
+        return persisted.takeIf { sessions ->
+            mixedIds.all { id -> sessions.any { it.id == id && it.mixedAssistantHistory } }
+        } ?: snapshot
+}
+
+/** R3/C3-S11：`publishReconciledChatSessions` 顶层化（体逐字等价；store 参数化）。 */
+internal fun publishReconciledChatSessionsInto(
+    store: UiStateWriter<ConversationPersistenceFields>,
+    chatRuns: ChatRunOwnership,
+    requested: List<ChatSessionRecord>,
+    persisted: List<ChatSessionRecord>
+) {
+        if (requested == persisted) return
+        val requestedById = requested.associateBy { it.id }
+        val correctedById = persisted.filter { it.mixedAssistantHistory }.associateBy { it.id }
+        val activeCorrection = store.updateWithResult { current ->
+            val corrected = current.chatSessions.map { session ->
+                correctedById[session.id]?.takeIf { requestedById[session.id] == session } ?: session
+            }
+            if (corrected == current.chatSessions) current to false else {
+                val activeBefore = current.chatSessions.firstOrNull { it.id == current.activeChatSessionId }
+                val activeAfter = corrected.firstOrNull { it.id == current.activeChatSessionId }
+                val activeWasCorrected = activeAfter != activeBefore
+                current.copy(
+                    chatSessions = corrected,
+                    messages = if (activeWasCorrected) activeAfter?.messages.orEmpty() else current.messages,
+                    isGenerating = if (activeWasCorrected) false else current.isGenerating,
+                    generationPhase = if (activeWasCorrected) null else current.generationPhase,
+                    generationTokenProgress = if (activeWasCorrected) null else current.generationTokenProgress,
+                    generationPersistProgress = if (activeWasCorrected) null else current.generationPersistProgress,
+                    statusMessage = if (activeWasCorrected) {
+                        "会话角色归属不明确，原始消息已保留；可从历史菜单创建角色分支。"
+                    } else current.statusMessage
+                ) to activeWasCorrected
+            }
+        }
+        if (activeCorrection) chatRuns.cancelCurrentAndCancelOwner()
+}
+
+/** R3/C3-S11：`cleanupPendingWorldBooksAfterOwnerCommit` 顶层化（体逐字等价）。 */
+internal fun cleanupPendingWorldBooksAfterOwnerCommitFor(
+    persistenceState: ChatSessionPersistenceState,
+    worldBookStore: WorldBookStore,
+    store: UiStateWriter<KnowledgeLibraryFields>,
+    scope: WorldBookScope,
+    retainedOwnerIds: Set<String>
+) {
+        val ownersToRemove = synchronized(persistenceState.stateLock) {
+            persistenceState.pendingWorldBookCleanupOwners[scope]
+                ?.filterNotTo(linkedSetOf()) { it in retainedOwnerIds }
+                .orEmpty()
+        }
+        if (ownersToRemove.isEmpty()) return
+        runCatching {
+            worldBookStore.removeScopedOwners(scope, ownersToRemove)
+        }.onSuccess { updatedWorldBooks ->
+            synchronized(persistenceState.stateLock) {
+                persistenceState.pendingWorldBookCleanupOwners[scope]?.let { pending ->
+                    pending.removeAll(ownersToRemove)
+                    if (pending.isEmpty()) persistenceState.pendingWorldBookCleanupOwners.remove(scope)
+                }
+            }
+            store.update { it.copy(worldBooks = updatedWorldBooks) }
+        }.onFailure { error ->
+            store.update {
+                it.copy(
+                    statusMessage = "主体数据已保存，但关联世界书清理失败，原数据已保留：${error.message ?: "存储错误"}"
+                )
+            }
+        }
+}
+
+/** R3/C3-S11：`cancelPendingWorldBookCleanup` 顶层化（体逐字等价）。 */
+internal fun cancelPendingWorldBookCleanupIn(
+    persistenceState: ChatSessionPersistenceState,
+    scope: WorldBookScope,
+    ownerIds: Set<String>
+) {
+        if (ownerIds.isEmpty()) return
+        synchronized(persistenceState.stateLock) {
+            persistenceState.pendingWorldBookCleanupOwners[scope]?.let { pending ->
+                pending.removeAll(ownerIds)
+                if (pending.isEmpty()) persistenceState.pendingWorldBookCleanupOwners.remove(scope)
+            }
+        }
+}

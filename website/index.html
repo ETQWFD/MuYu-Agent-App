@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MuYu-Agent 下载</title>
+<meta name="description" content="MuYu-Agent —— 本地优先的安卓 AI 工作台，支持 64 位与 32 位（armeabi-v7a）手机。">
+<style>
+  :root{
+    --navy:#0E2A47; --navy-2:#123658; --amber:#F2B45C;
+    --ink:#12202E; --muted:#5A6B7C; --line:#E4EAF0; --bg:#F7F9FC;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;background:var(--bg);color:var(--ink);-webkit-font-smoothing:antialiased}
+  .wrap{max-width:960px;margin:0 auto;padding:0 20px}
+  header{background:linear-gradient(160deg,var(--navy) 0%,var(--navy-2) 100%);color:#fff;padding:52px 0 60px}
+  .brand{display:flex;align-items:center;gap:16px}
+  .logo{width:56px;height:56px;flex:0 0 auto}
+  h1{font-size:30px;margin:0;letter-spacing:.5px}
+  .tag{margin:6px 0 0;color:#B9CDE0;font-size:14px}
+  .lead{margin:26px 0 0;font-size:16px;line-height:1.75;color:#DCE8F3;max-width:660px}
+  .badges{display:flex;flex-wrap:wrap;gap:8px;margin-top:20px}
+  .badge{border:1px solid rgba(255,255,255,.22);border-radius:999px;padding:5px 12px;font-size:12px;color:#E7F0F8}
+  nav.tabs{display:flex;gap:6px;margin-top:24px}
+  nav.tabs a{padding:8px 14px;border-radius:999px;text-decoration:none;font-size:13px;color:#CFE0EF;border:1px solid rgba(255,255,255,.18)}
+  nav.tabs a.on{background:rgba(255,255,255,.14);color:#fff}
+  main{margin-top:-28px;padding-bottom:40px}
+  .card{background:#fff;border:1px solid var(--line);border-radius:18px;box-shadow:0 6px 24px rgba(16,42,71,.08);padding:26px}
+  .card + .card{margin-top:20px}
+  h2{font-size:19px;margin:0 0 6px}
+  .sub{color:var(--muted);font-size:13px;line-height:1.7;margin:0}
+  .dl{display:inline-flex;align-items:center;gap:10px;background:var(--amber);color:#3A2207;font-weight:700;padding:15px 22px;border-radius:12px;text-decoration:none;margin-top:18px;transition:transform .15s ease,box-shadow .15s ease}
+  .dl:hover{transform:translateY(-1px);box-shadow:0 10px 20px rgba(242,180,92,.35)}
+  .ghost{display:inline-flex;align-items:center;gap:8px;border:1px solid var(--line);background:#fff;color:var(--ink);text-decoration:none;padding:11px 16px;border-radius:10px;font-size:14px;margin:10px 8px 0 0}
+  .ver{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;color:var(--muted);margin-top:12px}
+  .split{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:16px}
+  @media (max-width:680px){.split{grid-template-columns:1fr}}
+  .mini{border:1px solid var(--line);border-radius:12px;padding:16px}
+  .mini h3{font-size:14px;margin:0 0 6px}
+  .mini p{margin:0;font-size:13px;color:var(--muted);line-height:1.65}
+  ul{margin:10px 0 0 18px;padding:0;font-size:14px;color:var(--muted);line-height:1.9}
+  footer{padding:36px 0 56px;color:var(--muted);font-size:13px;line-height:1.8;text-align:center}
+  code{background:#F1F5F9;border:1px solid var(--line);border-radius:6px;padding:1px 6px;font-size:12.5px}
+</style>
+</head>
+<body>
+<header>
+  <div class="wrap">
+    <div class="brand">
+      <svg class="logo" viewBox="0 0 108 108" aria-hidden="true">
+        <rect width="108" height="108" rx="24" fill="#0E2A47"/>
+        <g transform="translate(54,54) scale(.80) translate(-54,-54)">
+          <path d="M30,62 C30,48 43,40 57,40 C71,40 82,48 82,56 C82,68 69,76 55,76 C42,76 30,70 30,62 Z" fill="#C98B3E"/>
+          <path d="M33,61 C33,49 45,43 57,43 C70,43 79,49 79,56 C79,66 68,73 55,73 C43,73 33,68 33,61 Z" fill="#F2B45C"/>
+          <path d="M37,57 C37,50 46,46 56,46 C64,46 71,49 74,53 C66,49 52,49 45,53 C41,55 39,57 39,60 Z" fill="#FFD79A"/>
+          <path d="M41,58 C41,55 44,53 48,53 L66,53 C70,53 73,55 73,58 C73,62 70,64 66,64 L48,64 C44,64 41,62 41,58 Z" fill="#7A4318"/>
+          <circle cx="72" cy="50.75" r="3.2" fill="#7A4318"/>
+          <path d="M78,52 C87,49 94,54 93,62 C92,69 85,72 80,69 C85,69 88,65 87,60 C86,56 82,54 78,55 Z" fill="#C98B3E"/>
+        </g>
+      </svg>
+      <div>
+        <h1>MuYu-Agent</h1>
+        <p class="tag">本地优先的安卓 AI 工作台 · 由 ET 维护</p>
+      </div>
+    </div>
+    <p class="lead">一个应用内自带的 AI 工作台：本地大模型对话、可配置的云端 API、模型管理与图像生成入口都在一起。不含广告与捆绑，装好即可使用。</p>
+    <div class="badges">
+      <span class="badge">Android 8.0+</span>
+      <span class="badge">arm64-v8a / armeabi-v7a（32 位）</span>
+      <span class="badge">应用内检查更新</span>
+      <span class="badge">Apache-2.0</span>
+    </div>
+    <nav class="tabs">
+      <a class="on" href="./index.html">下载</a>
+      <a href="./help.html">帮助</a>
+    </nav>
+  </div>
+</header>
+
+<main class="wrap">
+  <section class="card">
+    <h2>下载 MuYu-Agent</h2>
+    <p class="sub">同一个通用安装包同时包含 64 位与 32 位库，手机会自动选择匹配的版本，32 位老机型也能正常安装打开。</p>
+    <a class="dl" href="https://github.com/ETQWFD/MuYu-Agent-App/releases/latest">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#3A2207" stroke-width="2" stroke-linecap="round"><path d="M12 3v12"/><path d="M6 11l6 6 6-6"/><path d="M4 21h16"/></svg>
+      前往下载最新版本
+    </a>
+    <div>
+      <a class="ghost" href="https://gh-proxy.com/https://github.com/ETQWFD/MuYu-Agent-App/releases/latest">国内加速镜像</a>
+      <a class="ghost" href="https://github.com/ETQWFD/MuYu-Agent-App">源代码</a>
+    </div>
+    <p class="ver">当前版本 v0.4.0 · 通用包 MuYu-Agent-0.4.0-universal.apk</p>
+  </section>
+
+  <section class="card">
+    <h2>安装说明</h2>
+    <div class="split">
+      <div class="mini">
+        <h3>1. 允许安装未知来源</h3>
+        <p>下载完成后，点击安装包。若系统提示"禁止安装未知应用"，在设置中为浏览器或文件管理器打开"允许安装应用"。</p>
+      </div>
+      <div class="mini">
+        <h3>2. 覆盖安装</h3>
+        <p>如果之前装过其它签名的旧版本，需要先卸载旧版再安装，否则会提示"应用未安装"。</p>
+      </div>
+      <div class="mini">
+        <h3>3. 首次启动</h3>
+        <p>首次打开会引导你选择本地模型或填入云端 API。没有本地模型时，直接用云端 API 也能对话。</p>
+      </div>
+      <div class="mini">
+        <h3>4. 应用内更新</h3>
+        <p>设置 → 关于 → 检查更新，会从本仓库的 Release 拉取新版本并直接安装。</p>
+      </div>
+    </div>
+  </section>
+</main>
+
+<footer>
+  <div class="wrap">
+    MuYu-Agent 基于上游 MuYu Chat Agent（作者 lyydfys）二次开发与再分发，遵循 Apache-2.0。<br>
+    维护：ET · <a href="https://github.com/ETQWFD">github.com/ETQWFD</a>
+  </div>
+</footer>
+</body>
+</html>

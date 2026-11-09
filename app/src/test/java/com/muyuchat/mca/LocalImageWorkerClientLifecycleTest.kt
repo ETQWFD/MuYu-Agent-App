@@ -1,0 +1,834 @@
+package com.muyuchat.mca
+
+import java.io.File
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
+import org.junit.Test
+
+class LocalImageWorkerClientLifecycleTest {
+    @Test
+    fun upscaleStartsBoundedWatchdogAfterAcceptanceAndPreservesTimeoutTermination() {
+        val source = localImageWorkerSource("LocalImageWorkerClientUpscale.kt")
+        val upscale = functionBody(source, "internal suspend fun LocalImageWorkerClient.upscale(")
+        val accepted = upscale.indexOf("request.handshake.completeRemoteStart(accepted)")
+        val watchdog = upscale.indexOf("startUpscaleWatchdog(request)", accepted)
+        val awaitTerminal = upscale.indexOf("request.completion.await()", watchdog)
+
+        assertTrue(accepted >= 0)
+        assertTrue(watchdog > accepted)
+        assertTrue(awaitTerminal > watchdog)
+        assertTrue(upscale.contains("if (!request.watchdogTimedOut) request.watchdogJob?.cancel()"))
+        assertEquals("esrgan_worker_timeout", LOCAL_IMAGE_UPSCALE_WATCHDOG_TIMEOUT_CODE)
+        assertTrue(LOCAL_IMAGE_UPSCALE_MAX_RUNTIME_MS > localImageUpscaleHeartbeatTimeoutMs("upscaling"))
+    }
+
+    @Test
+    fun upscaleWatchdogUsesWorkerCallbacksAsHeartbeatWithoutDeviceAdmission() {
+        val source = localImageWorkerClientSource()
+        val callback = functionBody(source, "fun callbackFor(")
+        val watchdog = functionBody(
+            localImageWorkerSource("LocalImageWorkerClientWatchdogs.kt"),
+            "internal fun LocalImageWorkerClient.startUpscaleWatchdog("
+        )
+        val termination = functionBody(
+            localImageWorkerSource("LocalImageWorkerClientWatchdogs.kt"),
+            "internal fun LocalImageWorkerClient.completeWatchdogTimeoutAndRequestExit("
+        )
+
+        assertTrue(callback.contains("request.lastWorkerCallbackAtMs = SystemClock.elapsedRealtime()"))
+        assertTrue(watchdog.contains("localImageUpscaleHeartbeatTimeoutMs("))
+        assertTrue(watchdog.contains("LOCAL_IMAGE_UPSCALE_MAX_RUNTIME_MS"))
+        assertTrue(watchdog.contains("val timedOutEndpoint = currentEndpoint()"))
+        assertTrue(
+            watchdog.contains(
+                "completeWatchdogTimeoutAndRequestExit(request, timeout, timedOutEndpoint)"
+            )
+        )
+        assertTrue(termination.contains("requestRemoteSelfTermination(request, it)"))
+        assertFalse(watchdog.contains("Process.killProcess(workerPid)"))
+        assertFalse(termination.contains("Process.killProcess(workerPid)"))
+        assertFalse(watchdog.contains("deviceProfile"))
+        assertFalse(watchdog.contains("chipset"))
+        assertTrue(
+            localImageUpscaleHeartbeatTimeoutMs("worker_preparing") >
+                localImageUpscaleHeartbeatTimeoutMs("upscaling")
+        )
+        assertTrue(
+            localImageUpscaleHeartbeatTimeoutMs("waiting_for_native_lease") >
+                localImageUpscaleHeartbeatTimeoutMs("worker_preparing")
+        )
+    }
+
+    @Test
+    fun upscaleWorkerPublishesPreparationHeartbeatAndClosesModelLease() {
+        val service = functionBody(
+            localImageWorkerSource("LocalImageWorkerExecution.kt"),
+            "internal suspend fun LocalImageWorkerService.runUpscaleJob("
+        )
+        val heartbeat = service.indexOf("phase = \"worker_preparing\"")
+        val materialize = service.indexOf("workerInputStore.materializeUpscale(")
+        val closeLease = service.indexOf("workerInputs?.close()")
+
+        assertTrue(heartbeat >= 0)
+        assertTrue(materialize > heartbeat)
+        assertTrue(service.contains("isCancelled = {"))
+        assertTrue(service.contains("preparedInputs.close()"))
+        assertTrue(closeLease > materialize)
+    }
+
+    @Test
+    fun terminalOutcomesReleaseTheBindingAndAllowTheNextBind() {
+        listOf("success", "failure", "cancelled").forEach { outcome ->
+            val lifecycle = LocalImageWorkerBindingLifecycle()
+            val first = requireNotNull(lifecycle.issueBind())
+
+            assertTrue("$outcome must issue the first bind", lifecycle.isCurrent(first))
+            assertTrue("$outcome must not duplicate an active bind", lifecycle.issueBind() == null)
+            assertTrue("$outcome must unbind its worker", lifecycle.release(first))
+            assertFalse("$outcome must leave no active binding", lifecycle.bindIssued)
+            assertTrue(
+                "$outcome must allow the next generation to rebind",
+                lifecycle.issueBind() != null
+            )
+        }
+    }
+
+    @Test
+    fun terminalReleaseIsIdempotent() {
+        val lifecycle = LocalImageWorkerBindingLifecycle()
+        val session = requireNotNull(lifecycle.issueBind())
+        assertTrue(lifecycle.release(session))
+        assertFalse(lifecycle.release(session))
+    }
+
+    @Test
+    fun newBindWaitsForDisposableWorkerRetirementAfterTerminalRelease() {
+        val source = localImageWorkerClientSource() + localImageWorkerSource("LocalImageWorkerClientBinding.kt")
+        val awaitService = functionBody(
+            localImageWorkerSource("LocalImageWorkerClientBinding.kt"),
+            "internal suspend fun LocalImageWorkerClient.awaitService("
+        )
+        val cooldown = functionBody(
+            localImageWorkerSource("LocalImageWorkerClientWatchdogs.kt"),
+            "internal suspend fun LocalImageWorkerClient.awaitRebindCooldown("
+        )
+        assertTrue(awaitService.contains("awaitRebindCooldown()"))
+        assertTrue(cooldown.contains("LOCAL_IMAGE_WORKER_REBIND_COOLDOWN_MS"))
+        assertTrue(cooldown.contains("bindingSession != null"))
+        assertTrue(cooldown.contains("delay(remaining)"))
+        assertTrue(source.contains("lastBindingReleaseAtElapsedMs = SystemClock.elapsedRealtime()"))
+    }
+
+    @Test
+    fun staleBindingSessionCannotReleaseOrInvalidateItsReplacement() {
+        val lifecycle = LocalImageWorkerBindingLifecycle()
+        val first = requireNotNull(lifecycle.issueBind())
+        assertTrue(lifecycle.release(first))
+
+        val second = requireNotNull(lifecycle.issueBind())
+        assertTrue(second.epoch > first.epoch)
+        assertFalse(lifecycle.isCurrent(first))
+        assertTrue(lifecycle.isCurrent(second))
+
+        listOf(
+            "late onServiceDisconnected",
+            "late onBindingDied",
+            "late onNullBinding",
+            "late binder death"
+        ).forEach { callback ->
+            assertFalse("$callback must not release the replacement", lifecycle.release(first))
+        }
+        assertTrue(lifecycle.bindIssued)
+        assertTrue(lifecycle.isCurrent(second))
+    }
+
+    @Test
+    fun eachBindingEpochOwnsItsConnectionAndAllTerminalCallbacksCarryIt() {
+        val source = localImageWorkerClientSource()
+        val connectionClass = functionBody(source, "inner class WorkerServiceConnection(")
+        val awaitService = functionBody(
+            localImageWorkerSource("LocalImageWorkerClientBinding.kt"),
+            "internal suspend fun LocalImageWorkerClient.awaitService("
+        )
+        val connectionLoss = functionBody(
+            localImageWorkerSource("LocalImageWorkerClientBinding.kt"),
+            "internal fun LocalImageWorkerClient.handleConnectionLoss("
+        )
+
+        assertTrue(connectionClass.contains("val lease: LocalImageWorkerBindingLifecycle.Session"))
+        assertTrue(connectionClass.contains("handleServiceConnected(this, binder)"))
+        assertTrue(connectionClass.contains("override fun onServiceDisconnected("))
+        assertTrue(connectionClass.contains("override fun onBindingDied("))
+        assertTrue(connectionClass.contains("override fun onNullBinding("))
+        assertTrue(
+            "every terminal ServiceConnection callback must identify its own bind epoch",
+            connectionClass.split("handleConnectionLoss(this,").size - 1 == 3
+        )
+        assertTrue(awaitService.contains("val connection = WorkerServiceConnection(lease)"))
+        assertTrue(connectionLoss.contains("current.connection !== connection"))
+        assertTrue(connectionLoss.contains("!bindingLifecycle.isCurrent(connection.lease)"))
+    }
+
+    @Test
+    fun bindingOwnerPublicationIsAtomicAndStaleBindCompletionRetiresItself() {
+        val source = localImageWorkerClientSource()
+        val awaitService = functionBody(
+            localImageWorkerSource("LocalImageWorkerClientBinding.kt"),
+            "internal suspend fun LocalImageWorkerClient.awaitService("
+        )
+        val selectionLock = functionBody(awaitService, "synchronized(stateLock)")
+
+        assertTrue(selectionLock.contains("onSessionSelected(session)"))
+        assertTrue(awaitService.contains("else if (!isCurrentBindingSession(session))"))
+        assertTrue(
+            awaitService.contains("appContext.unbindService(session.connection)")
+        )
+        assertTrue(
+            awaitService.contains(
+                "session.deferred.completeExceptionally("
+            )
+        )
+    }
+
+    @Test
+    fun cancelledPreparationReleasesOnlyItsExactUnclaimedBindingEpoch() {
+        val source = localImageWorkerClientSource()
+        val begin = functionBody(source, "fun begin(")
+        val release = functionBody(
+            localImageWorkerSource("LocalImageWorkerClientBinding.kt"),
+            "internal fun LocalImageWorkerClient.releaseBindingAfterPreparationFailure("
+        )
+
+        assertTrue(begin.contains("releaseBindingAfterPreparationFailure(next, error)"))
+        assertTrue(release.contains("candidate.bindingSession"))
+        assertTrue(release.contains("?.takeIf { it !== candidate }"))
+        assertTrue(release.contains("?.bindingSession === expectedSession"))
+        assertTrue(release.contains("activeRequest?.bindingSession === expectedSession"))
+        assertTrue(release.contains("bindingSession !== expectedSession"))
+        assertTrue(release.contains("bindingLifecycle.release(expectedSession.lease)"))
+        assertTrue(release.contains("appContext.unbindService(releasedSession.connection)"))
+    }
+
+    @Test
+    fun resultPublicationWinsBeforeCancellation() {
+        val gate = LocalImageWorkerPublicationGate()
+
+        assertTrue(gate.tryBeginResultPublication())
+        assertFalse(gate.tryRequestCancellation())
+        assertFalse(gate.cancelRequested)
+    }
+
+    @Test
+    fun resultPublicationRetirementWaitsForTerminalAttemptSignal() {
+        val gate = LocalImageWorkerPublicationGate()
+
+        assertTrue(gate.tryBeginResultPublication())
+        assertTrue(gate.resultPublicationStarted)
+        assertFalse(gate.awaitResultPublicationTerminalAttempt(0L))
+
+        gate.markResultPublicationTerminalAttemptFinished()
+
+        assertTrue(gate.awaitResultPublicationTerminalAttempt(0L))
+    }
+
+    @Test
+    fun processRetirementIsMonotonicAndRejectsLaterAdmission() {
+        val retirement = LocalImageWorkerProcessRetirementGate()
+
+        assertFalse(retirement.isRetiring)
+        assertTrue(retirement.beginRetirement())
+        assertTrue(retirement.isRetiring)
+        assertFalse(retirement.beginRetirement())
+    }
+
+    @Test
+    fun cancellationWinsBeforeResultPublication() {
+        val gate = LocalImageWorkerPublicationGate()
+
+        assertTrue(gate.tryRequestCancellation())
+        assertFalse(gate.tryBeginResultPublication())
+        assertTrue(gate.cancelRequested)
+    }
+
+    @Test
+    fun publicationAndCancellationGatesAreIdempotent() {
+        val publicationGate = LocalImageWorkerPublicationGate()
+        assertTrue(publicationGate.tryBeginResultPublication())
+        assertFalse(publicationGate.tryBeginResultPublication())
+        assertFalse(publicationGate.tryRequestCancellation())
+        assertFalse(publicationGate.cancelRequested)
+
+        val cancellationGate = LocalImageWorkerPublicationGate()
+        assertTrue(cancellationGate.tryRequestCancellation())
+        assertFalse(cancellationGate.tryRequestCancellation())
+        assertFalse(cancellationGate.tryBeginResultPublication())
+        assertTrue(cancellationGate.cancelRequested)
+    }
+
+    @Test
+    fun cancellationTerminalIsPublishedExactlyOnceAndExcludesOtherTerminals() {
+        val gate = LocalImageWorkerPublicationGate()
+
+        assertTrue(gate.tryRequestCancellation())
+        assertTrue(gate.tryBeginCancellationTerminalPublication())
+        assertFalse(gate.tryBeginCancellationTerminalPublication())
+        assertFalse(gate.tryBeginResultPublication())
+        assertFalse(gate.tryBeginErrorPublication())
+        assertTrue(gate.cancelRequested)
+    }
+
+    @Test
+    fun normalErrorTerminalExcludesCancellationAndResultPublication() {
+        val gate = LocalImageWorkerPublicationGate()
+
+        assertTrue(gate.tryBeginErrorPublication())
+        assertFalse(gate.tryBeginErrorPublication())
+        assertFalse(gate.tryRequestCancellation())
+        assertFalse(gate.tryBeginCancellationTerminalPublication())
+        assertFalse(gate.tryBeginResultPublication())
+        assertFalse(gate.cancelRequested)
+    }
+
+    @Test
+    fun normalFailureClaimsTerminalBeforeWritingFailedJournal() {
+        val job = functionBody(
+            localImageWorkerSource("LocalImageWorkerExecution.kt"),
+            "internal suspend fun LocalImageWorkerService.runGenerateJob("
+        )
+        val catchStart = job.indexOf("} catch (error: Throwable) {")
+        require(catchStart >= 0) { "Missing worker failure handler" }
+        val failureHandler = job.substring(catchStart)
+        val claim = failureHandler.indexOf("active.tryBeginErrorPublication()")
+        val failedJournal = failureHandler.indexOf("ImageExecutionPhase.FAILED")
+        val cancelledJournal = failureHandler.indexOf("finishJournalCancelled(")
+
+        assertTrue(claim >= 0)
+        assertTrue(failedJournal > claim)
+        assertTrue(cancelledJournal > failedJournal)
+    }
+
+    @Test
+    fun cancellationBeforeRegistrationCompletesTheClientDeferredLocally() {
+        val cancel = functionBody(localImageWorkerClientSource(), "private fun cancelInternal(")
+        val localAction = cancel.indexOf("LocalImageStartHandshake.CancelAction.COMPLETE_LOCALLY")
+        val completion = cancel.indexOf("request.completion.completeExceptionally(cancellation)")
+
+        assertTrue(localAction >= 0)
+        assertTrue(completion > localAction)
+    }
+
+    @Test
+    fun cancellationDuringRegistrationIsSentAsSoonAsTheWorkerAccepts() {
+        val generate = functionBody(localImageWorkerClientSource(), "suspend fun generate(")
+        val registration = generate.indexOf(
+            "val cancelAfterRegistration = request.handshake.completeRemoteStart(accepted)"
+        )
+        val deferredBranch = generate.indexOf("else if (cancelAfterRegistration)", registration)
+        val remoteCancel = generate.indexOf("cancelRemote(request)", deferredBranch)
+        val awaitTerminal = generate.indexOf("val result = request.completion.await()", remoteCancel)
+
+        assertTrue(registration >= 0)
+        assertTrue(deferredBranch > registration)
+        assertTrue(remoteCancel > deferredBranch)
+        assertTrue(awaitTerminal > remoteCancel)
+    }
+
+    @Test
+    fun cancellationAfterRegistrationPublishesAWorkerTerminalThatCompletesTheClientDeferred() {
+        val clientSource = localImageWorkerClientSource()
+        val serviceSource = localImageWorkerServiceSource()
+        val cancel = functionBody(clientSource, "private fun cancelInternal(")
+        val cancelRemote = functionBody(
+            localImageWorkerSource("LocalImageWorkerClientWatchdogs.kt"),
+            "internal fun LocalImageWorkerClient.cancelRemote("
+        )
+        val serviceCancel = functionBody(serviceSource, "override fun cancel(")
+        val cancellationTerminal = functionBody(
+            localImageWorkerSource("LocalImageWorkerTerminal.kt"),
+            "internal fun LocalImageWorkerService.publishCancellationTerminal("
+        )
+        val onError = functionBody(clientSource, "override fun onError(")
+
+        assertTrue(
+            cancel.contains(
+                "LocalImageStartHandshake.CancelAction.CANCEL_REMOTE -> cancelRemote(request)"
+            )
+        )
+        assertTrue(serviceCancel.contains("publishCancellationTerminal(active,"))
+        assertTrue(cancellationTerminal.contains("tryBeginCancellationTerminalPublication()"))
+        assertTrue(cancellationTerminal.contains("code = LOCAL_IMAGE_GENERATION_CANCELLED_CODE"))
+        assertTrue(onError.contains("LOCAL_IMAGE_GENERATION_CANCELLED_CODE"))
+        assertTrue(onError.contains("LocalImageWorkerCancelledException()"))
+        assertTrue(onError.contains("request.completion.completeExceptionally("))
+        assertTrue(cancelRemote.contains("if (cancelled)"))
+        assertTrue(
+            cancelRemote.contains(
+                "request.completion.completeExceptionally(LocalImageWorkerCancelledException())"
+            )
+        )
+    }
+
+    @Test
+    fun generateFinallyReleasesBinderStateBeforeClearingTheActiveRequest() {
+        val source = localImageWorkerClientSource()
+        val generateStart = source.indexOf("suspend fun generate(")
+        require(generateStart >= 0) { "Missing generate()" }
+        val generateEnd = source.indexOf("override fun close()", generateStart)
+        require(generateEnd > generateStart) { "Missing close() after generate()" }
+        val generate = source.substring(generateStart, generateEnd)
+        val release = functionBody(
+            localImageWorkerSource("LocalImageWorkerClientBinding.kt"),
+            "internal fun LocalImageWorkerClient.releaseBindingAfterRequest("
+        )
+
+        val finallyBlock = generate.substring(generate.indexOf("finally {") + "finally {".length)
+        assertTrue(finallyBlock.contains("releaseBindingAfterRequest(request, model.runtime)"))
+        assertTrue(release.contains("bindingLifecycle.release(expectedSession.lease)"))
+        assertTrue(release.contains("unlinkRemoteDeathRecipientLocked()"))
+        assertTrue(release.contains("remote = null"))
+        assertTrue(release.contains("remoteBinder = null"))
+        assertTrue(release.contains("appContext.unbindService(releasedSession.connection)"))
+        assertTrue(
+            "unbind must finish before a new request can observe activeRequest=null",
+            release.indexOf("appContext.unbindService(releasedSession.connection)") <
+                release.lastIndexOf("activeRequest === request")
+        )
+    }
+
+    @Test
+    fun releasedWorkerRequiresBinderDeathProofBeforeMemoryCanBeReused() {
+        val source = localImageWorkerClientSource()
+        val awaitRelease = functionBody(source, "suspend fun awaitOwnedWorkerRelease(")
+        val release = functionBody(
+            localImageWorkerSource("LocalImageWorkerClientBinding.kt"),
+            "internal fun LocalImageWorkerClient.releaseBindingAfterRequest("
+        )
+        val arm = functionBody(
+            localImageWorkerSource("LocalImageWorkerClientBinding.kt"),
+            "internal fun LocalImageWorkerClient.armReleasedWorkerExitWaiterLocked("
+        )
+
+        assertTrue(awaitRelease.contains("image_worker_exit_unconfirmed"))
+        assertTrue(awaitRelease.contains("withTimeoutOrNull(timeoutMs)"))
+        assertTrue(release.contains("armReleasedWorkerExitWaiterLocked(remoteBinder)"))
+        assertTrue(arm.contains("binder.linkToDeath(recipient, 0)"))
+        assertTrue(arm.contains("releasedWorkerExits[binder] = waiter"))
+        assertFalse(functionBody(
+            localImageWorkerSource("LocalImageWorkerClientBinding.kt"),
+            "internal fun LocalImageWorkerClient.handleConnectionLoss(")
+            .contains(".complete(Unit)"))
+    }
+
+    @Test
+    fun successfulDeliveryCommitsPublicationBeforeClientUnbindCanDestroyTheService() {
+        val source = localImageWorkerServiceSource()
+        val job = functionBody(
+            localImageWorkerSource("LocalImageWorkerExecution.kt"),
+            "internal suspend fun LocalImageWorkerService.runGenerateJob("
+        )
+        val beginPublication = job.indexOf("active.tryBeginResultPublication()")
+        val deliver = job.indexOf("val delivered = sendComplete(")
+        val completed = job.indexOf(
+            "markJournalTerminal(request.requestId, ImageExecutionPhase.COMPLETED)"
+        )
+        val deliveryFailed = job.indexOf("errorCode = \"RESULT_DELIVERY_FAILED\"")
+        val cleanupBeforeFailure = job.indexOf("transferredOutputs.deleteWorkerOutputs()")
+        val terminalAttemptFinished =
+            job.indexOf("active.markResultPublicationTerminalAttemptFinished()")
+        val onDestroy = functionBody(source, "override fun onDestroy()")
+        val writeResult = functionBody(
+            localImageWorkerSource("LocalImageWorkerTerminal.kt"),
+            "internal fun LocalImageWorkerService.writeResultFile("
+        )
+
+        assertTrue("worker job must contain its result callback", deliver >= 0)
+        assertTrue(
+            "a successful callback can resume the client and unbind synchronously; " +
+                "publication must commit before invoking that callback",
+            beginPublication in 0 until deliver
+        )
+        assertTrue(onDestroy.contains("if (active.tryRequestCancellation())"))
+        assertTrue(
+            "COMPLETED is committed only after the callback confirms delivery",
+            completed > deliver
+        )
+        assertTrue(
+            "a callback delivery failure must remain FAILED rather than COMPLETED",
+            deliveryFailed > completed
+        )
+        assertTrue(
+            "undelivered outputs must be removed before the FAILED journal terminal",
+            cleanupBeforeFailure in (completed + 1) until deliveryFailed
+        )
+        assertTrue(
+            "process retirement may proceed only after the callback returned and terminal write was attempted",
+            terminalAttemptFinished > deliveryFailed
+        )
+        assertFalse(
+            "scope cancellation during onDestroy must not interrupt the synchronous terminal commit window",
+            job.substring(deliver, terminalAttemptFinished).contains("ensureActive()")
+        )
+        assertTrue(onDestroy.contains("active?.resultPublicationStarted == true"))
+        assertTrue(onDestroy.contains("scheduleResultPublicationSelfExit(requireNotNull(active))"))
+        assertTrue(onDestroy.contains("if (awaitResultPublication) return"))
+        assertTrue(writeResult.contains("output.fd.sync()"))
+        assertTrue(writeResult.contains("durableMoveWithinParent("))
+        assertTrue(writeResult.contains("target.partial.delete()"))
+    }
+
+    @Test
+    fun retiringWorkerRejectsSameProcessRebindBeforeRecoveryOrCleanup() {
+        val source = localImageWorkerServiceSource()
+        val onCreate = functionBody(source, "override fun onCreate()")
+        val onDestroy = functionBody(source, "override fun onDestroy()")
+        val publicationExit = functionBody(
+            source,
+            "private fun scheduleResultPublicationSelfExit("
+        )
+        val retirementCheck = onCreate.indexOf("PROCESS_RETIREMENT.isRetiring")
+        val providerInitialization = onCreate.indexOf("provider = LocalImageProvider(")
+        val recovery = onCreate.indexOf("recoverAbandonedRequests(")
+
+        assertTrue(retirementCheck >= 0)
+        assertTrue(retirementCheck < providerInitialization)
+        assertTrue(retirementCheck < recovery)
+        assertTrue(
+            source.contains(
+                "binder.takeUnless { rejectedRetiringProcess || PROCESS_RETIREMENT.isRetiring }"
+            )
+        )
+        assertTrue(
+            onDestroy.indexOf("PROCESS_RETIREMENT.beginRetirement()") <
+                onDestroy.indexOf("activeGeneration.also { activeGeneration = null }")
+        )
+        assertTrue(
+            publicationExit.indexOf("active.awaitResultPublicationTerminalAttempt(") <
+                publicationExit.indexOf("Process.killProcess(Process.myPid())")
+        )
+        assertTrue(publicationExit.contains("RESULT_PUBLICATION_EXIT_TIMEOUT_MS"))
+    }
+
+    @Test
+    fun unfinishedBinderDeathStillFailsTheClientAndStopsTheWorker() {
+        val clientSource = localImageWorkerClientSource()
+        val serviceSource = localImageWorkerServiceSource()
+        val connected = functionBody(clientSource, "override fun onServiceConnected(")
+        val serviceConnected = functionBody(
+            localImageWorkerSource("LocalImageWorkerClientBinding.kt"),
+            "internal fun LocalImageWorkerClient.handleServiceConnected("
+        )
+        val connectionLoss = functionBody(
+            localImageWorkerSource("LocalImageWorkerClientBinding.kt"),
+            "internal fun LocalImageWorkerClient.handleConnectionLoss("
+        )
+        val generate = functionBody(serviceSource, "override fun generate(")
+        val deadClient = functionBody(serviceSource, "internal fun cancelForDeadClient(")
+
+        assertTrue(connected.contains("handleServiceConnected(this, binder)"))
+        assertTrue(serviceConnected.contains("handleConnectionLoss("))
+        assertTrue(serviceConnected.contains("connection,"))
+        assertTrue(connectionLoss.contains("current.connection !== connection"))
+        assertTrue(connectionLoss.contains("!bindingLifecycle.isCurrent(connection.lease)"))
+        assertTrue(connectionLoss.contains("active?.completion?.completeExceptionally(failure)"))
+        assertTrue(generate.contains("cancelForDeadClient(active)"))
+        assertTrue(deadClient.contains("activeGeneration !== active"))
+        assertTrue(deadClient.contains("!active.tryRequestCancellation()"))
+        assertTrue(
+            deadClient.indexOf("synchronized(stateLock)") <
+                deadClient.indexOf("runCatching { provider.cancel() }")
+        )
+        assertTrue(deadClient.contains("if (!isCurrentCancellation) return"))
+        assertTrue(deadClient.contains("scheduleSelfExit(active)"))
+        assertTrue(deadClient.contains("requestJournalCancellation(active.requestId)"))
+        assertTrue(deadClient.contains("provider.cancel()"))
+        assertTrue(deadClient.contains("active.job?.cancel("))
+    }
+
+    @Test
+    fun workerRejectsIncompleteModelBeforeProviderBegin() {
+        val source = localImageWorkerServiceSource()
+        val generate = functionBody(source, "override fun generate(")
+        val readiness = generate.indexOf("localImageStructuralReadinessMessage()")
+        val active = generate.indexOf("val active = ActiveGeneration", readiness)
+        val providerBegin = generate.indexOf("provider.begin(request.model.runtime)", active)
+        assertTrue(readiness >= 0)
+        assertTrue(active > readiness)
+        assertTrue(providerBegin > active)
+        assertTrue(generate.substring(readiness, active).contains("code = \"image_model_not_ready\""))
+    }
+
+    @Test
+    fun explicitCancellationStillCancelsTheRegisteredRemoteRequest() {
+        val clientSource = localImageWorkerClientSource()
+        val serviceSource = localImageWorkerServiceSource()
+        val serviceCancel = functionBody(serviceSource, "override fun cancel(")
+
+        assertTrue(clientSource.contains("request?.handshake?.requestCancel()"))
+        assertTrue(clientSource.contains("cancelRemote(request)"))
+        assertTrue(serviceCancel.contains("localImageCancelRequestMatches(requestedId, it.requestId)"))
+        assertTrue(
+            serviceCancel.indexOf("localImageCancelRequestMatches") <
+                serviceCancel.indexOf("it.tryRequestCancellation()")
+        )
+        assertTrue(serviceCancel.contains("requestJournalCancellation(active.requestId)"))
+        assertTrue(serviceCancel.contains("runCatching { provider.cancel() }"))
+        assertTrue(
+            serviceCancel.indexOf("synchronized(stateLock)") <
+                serviceCancel.indexOf("runCatching { provider.cancel() }")
+        )
+        assertTrue(serviceCancel.contains("active.job?.cancel("))
+        assertTrue(serviceCancel.contains("return true"))
+    }
+
+    @Test
+    fun requestScopedCancelMatchesOnlyTheCurrentRequestAndKeepsLegacyLifecycleBehavior() {
+        assertTrue(localImageCancelRequestMatches("request-a", "request-a"))
+        assertFalse(localImageCancelRequestMatches("request-a", "replacement-b"))
+        assertFalse(localImageCancelRequestMatches("", "replacement-b"))
+        assertTrue(localImageCancelRequestMatches(null, "replacement-b"))
+        assertFalse(localImageCancelRequestMatches(null, null))
+
+        val source = localImageWorkerClientSource()
+        val scopedCancel = functionBody(source, "fun cancel(expectedRequestId: String)")
+        val internalCancel = functionBody(source, "private fun cancelInternal(")
+        val legacyCancel = functionBody(source, "fun cancel(): Boolean")
+        val serviceCancel = functionBody(localImageWorkerServiceSource(), "override fun cancel(")
+
+        assertTrue(scopedCancel.contains("if (expectedRequestId.isBlank()) return false"))
+        assertTrue(scopedCancel.contains("cancelInternal(expectedRequestId = expectedRequestId, scoped = true)"))
+        assertTrue(legacyCancel.contains("cancelInternal(expectedRequestId = null, scoped = false)"))
+        assertTrue(
+            internalCancel.indexOf("localImageCancelRequestMatches(expectedRequestId, it.requestId)") <
+                internalCancel.indexOf("request?.handshake?.requestCancel()")
+        )
+        assertTrue(serviceCancel.contains("localImageCancelRequestMatches(requestedId, it.requestId)"))
+    }
+
+    @Test
+    fun watchdogTerminationIsRequestBoundAndNeverKillsACallbackPid() {
+        val clientSource = localImageWorkerClientSource()
+        val generationWatchdog = functionBody(
+            localImageWorkerSource("LocalImageWorkerClientWatchdogs.kt"),
+            "internal fun LocalImageWorkerClient.startWatchdog("
+        )
+        val upscaleWatchdog = functionBody(
+            localImageWorkerSource("LocalImageWorkerClientWatchdogs.kt"),
+            "internal fun LocalImageWorkerClient.startUpscaleWatchdog("
+        )
+        val termination = functionBody(
+            localImageWorkerSource("LocalImageWorkerClientWatchdogs.kt"),
+            "internal fun LocalImageWorkerClient.requestRemoteSelfTermination("
+        )
+        val timeoutDispatch = functionBody(
+            localImageWorkerSource("LocalImageWorkerClientWatchdogs.kt"),
+            "internal fun LocalImageWorkerClient.completeWatchdogTimeoutAndRequestExit("
+        )
+        val awaitDispatch = functionBody(
+            localImageWorkerSource("LocalImageWorkerClientWatchdogs.kt"),
+            "internal suspend fun LocalImageWorkerClient.awaitWatchdogTerminationDispatch("
+        )
+        val serviceTermination = functionBody(
+            localImageWorkerServiceSource(),
+            "override fun cancelAndExit("
+        )
+
+        assertTrue(generationWatchdog.contains("completeWatchdogTimeoutAndRequestExit("))
+        assertTrue(upscaleWatchdog.contains("completeWatchdogTimeoutAndRequestExit("))
+        assertTrue(timeoutDispatch.contains("request.completion.completeExceptionally(timeout)"))
+        assertTrue(timeoutDispatch.contains("requestRemoteSelfTermination(request, it)"))
+        assertTrue(timeoutDispatch.contains("request.watchdogTerminationDispatched.complete(Unit)"))
+        assertTrue(awaitDispatch.contains("withContext(NonCancellable)"))
+        assertTrue(awaitDispatch.contains("request.watchdogTerminationDispatched.await()"))
+        assertTrue(
+            clientSource.indexOf("awaitWatchdogTerminationDispatch(request)") <
+                clientSource.indexOf("releaseBindingAfterRequest(request, model.runtime)")
+        )
+        assertFalse(clientSource.contains("Process.killProcess(workerPid)"))
+        assertTrue(termination.contains("LocalImageWorkerProtocol.cancelRequest(request.requestId)"))
+        assertTrue(serviceTermination.contains("localImageCancelRequestMatches(requestedId, it.requestId)"))
+        assertTrue(serviceTermination.contains("scheduleSelfExit(active)"))
+    }
+
+    @Test
+    fun restartedWorkerRecoversOldJournalWithoutTrustingReusedPid() {
+        val recovery = functionBody(
+            localImageWorkerSource("LocalImageWorkerRecovery.kt"),
+            "internal fun LocalImageWorkerService.recoverInterruptedExecutions("
+        )
+
+        assertTrue(recovery.contains("recoverInterrupted(cleanupRoots = listOf(cacheDir)) { false }"))
+        assertFalse(recovery.contains("/proc/"))
+        assertFalse(recovery.contains("isDirectory"))
+    }
+
+    @Test
+    fun closingOneClientDoesNotDeleteAnotherRequestsPublishedResults() {
+        val source = localImageWorkerClientSource()
+        val close = functionBody(source, "override fun close()")
+
+        assertFalse(close.contains("cleanupWorkerResults()"))
+        assertFalse(source.contains("private fun cleanupWorkerResults()"))
+    }
+
+    @Test
+    fun randomSeedSentinelIsResolvedBeforeNativeWorkerExecution() {
+        val generate = functionBody(localImageWorkerServiceSource(), "override fun generate(") +
+            functionBody(
+                localImageWorkerSource("LocalImageWorkerExecution.kt"),
+                "internal suspend fun LocalImageWorkerService.runGenerateJob("
+            )
+
+        assertTrue(generate.contains("request.options.seed == null || request.options.seed == -1"))
+        assertTrue(generate.contains("val workerOptions = workerInputs.options"))
+    }
+
+    @Test
+    fun splitSdxlRuntimeFallbackRequiresExactBinderDeathProof() {
+        val source = localImageWorkerSource("SdxlTwoPhaseCoordinatorPhaseClient.kt")
+        val runtimeSelection = localImageWorkerSource("SdxlTwoPhaseCoordinatorRuntimeSelection.kt")
+        val execute = functionBody(source, "suspend fun execute(request: SdxlImagePhaseRequest")
+        val executeCandidates = functionBody(
+            runtimeSelection,
+            "internal suspend fun <T> executeSdxlRuntimeCandidates("
+        )
+        val cancelAndAwaitExit = functionBody(source, "private suspend fun cancelAndAwaitExit(")
+        val throwFailureAfterExit = functionBody(
+            source,
+            "private suspend fun throwFailureAfterExit("
+        )
+        val awaitExactBinderDeath = functionBody(source, "private suspend fun awaitExactBinderDeath(")
+        val failConnection = functionBody(source, "private fun failConnection(")
+
+        assertTrue(source.contains("private val binderDeath = CompletableDeferred<Unit>()"))
+        assertTrue(source.contains("private val deathRecipient = IBinder.DeathRecipient"))
+        assertTrue(source.contains("binderDeath.complete(Unit)"))
+        assertTrue(execute.contains("dispatchAttempted = true"))
+        assertTrue(execute.contains("catch (timeout: TimeoutCancellationException)"))
+        assertTrue(executeCandidates.contains("catch (error: LocalImageWorkerRemoteException)"))
+        assertTrue(executeCandidates.contains("shouldRetrySdxlRuntimeCandidate("))
+        assertTrue(execute.contains("catch (cancelled: CancellationException)"))
+        assertTrue(execute.contains("catch (error: Throwable)"))
+        assertTrue(execute.contains("throwFailureAfterExit(terminal.error)"))
+        assertTrue(source.contains("worker_exit_unconfirmed"))
+        assertTrue(cancelAndAwaitExit.contains("cancelAndTerminate()"))
+        assertTrue(cancelAndAwaitExit.contains("releaseBindingForExit()"))
+        assertTrue(cancelAndAwaitExit.contains("requiresExactExitProof()"))
+        assertTrue(throwFailureAfterExit.contains("cancelAndAwaitExit()"))
+        assertTrue(awaitExactBinderDeath.contains("binderDeath.await()"))
+        assertFalse(failConnection.contains("binderDeath.complete"))
+        assertFalse(source.contains("awaitRemoteFailureExit"))
+    }
+
+    @Test
+    fun splitSdxlProviderCleanupRetainsGlobalGateUntilPersistentRequestBarrier() {
+        // P7/S31: the durable request lease (incl. awaitFinishAfterProviderCleanup /
+        // finishUnderExclusiveBarrier) moved to SdxlTwoPhaseRequestLease.kt; reading both files
+        // keeps the same contract under test -- the assertions below are unchanged.
+        val coordinator = localImageWorkerSource("SdxlTwoPhaseCoordinator.kt") +
+            localImageWorkerSource("SdxlTwoPhaseRequestLease.kt")
+        // P5/L10: the provider-side Qwen generation body (incl. its cacheDir output root)
+        // moved out of LocalImageProvider.kt into this owner file.
+        val qwenGeneration = localImageWorkerSource("LocalImageQwenImage21Operations.kt")
+        // P5/L8: the provider-side SPLIT request lease tail lives in the generate() body.
+        val generation = localImageWorkerSource("LocalImageGenerationQnnPreparation.kt") +
+            localImageWorkerSource("LocalImageGenerationQnnExecution.kt")
+        val phaseService = localImageWorkerSource("SdxlImagePhaseWorkerService.kt")
+        val workerService = localImageWorkerServiceSource()
+        val awaitFinish = functionBody(
+            coordinator,
+            "suspend fun awaitFinishAfterProviderCleanup("
+        )
+        val finishUnderBarrier = functionBody(
+            coordinator,
+            "private fun finishUnderExclusiveBarrier("
+        )
+        val phaseExecute = functionBody(phaseService, "override fun execute(")
+
+        assertTrue(generation.contains("splitRequestLease?.awaitFinishAfterProviderCleanup("))
+        assertFalse(generation.contains("splitRequestLease?.finishAfterProviderCleanup("))
+        assertTrue(awaitFinish.contains("withContext(NonCancellable)"))
+        assertTrue(awaitFinish.contains("while (admission == null)"))
+        assertTrue(awaitFinish.contains("while (exclusive == null)"))
+        assertTrue(awaitFinish.indexOf("close()") < awaitFinish.indexOf("while (exclusive == null)"))
+        assertTrue(awaitFinish.contains("while (!finished)"))
+        assertTrue(awaitFinish.contains("pauseBeforeSdxlCleanupBarrierRetry(\"admission\""))
+        assertTrue(awaitFinish.contains("pauseBeforeSdxlCleanupBarrierRetry(\"request\""))
+        assertTrue(awaitFinish.contains("pauseBeforeSdxlCleanupBarrierRetry("))
+        assertFalse(awaitFinish.contains("withTimeout("))
+        assertTrue(finishUnderBarrier.contains("store.markTerminal("))
+        assertTrue(
+            finishUnderBarrier.substringAfter("store.markTerminal(")
+                .contains("trackedPaths.forEach")
+        )
+        assertTrue(
+            phaseExecute.indexOf("acquirePhaseOwnership(") <
+                phaseExecute.indexOf("activeJob = scope.launch")
+        )
+        assertTrue(coordinator.contains("appContext.noBackupFilesDir"))
+        assertTrue(phaseService.contains("noBackupFilesDir"))
+        assertTrue(workerService.contains("coordinationRoot = File("))
+        assertTrue(workerService.contains("noBackupFilesDir"))
+        assertTrue(qwenGeneration.contains("appContext.cacheDir"))
+        assertTrue(generation.contains("SDXL_TWO_PHASE_DIRECTORY"))
+    }
+
+    private fun localImageWorkerClientSource(): String {
+        return localImageWorkerSource("LocalImageWorkerClient.kt")
+    }
+
+    private fun localImageWorkerServiceSource(): String {
+        return localImageWorkerSource("LocalImageWorkerService.kt")
+    }
+
+    private fun localImageWorkerSource(fileName: String): String {
+        var root = File(requireNotNull(System.getProperty("user.dir"))).absoluteFile
+        repeat(6) {
+            listOf(
+                File(root, "src/main/java/com/muyuchat/mca/$fileName"),
+                File(root, "app/src/main/java/com/muyuchat/mca/$fileName")
+            ).firstOrNull(File::isFile)?.let { return it.readText(Charsets.UTF_8) }
+            root = root.parentFile ?: return@repeat
+        }
+        error("Unable to locate $fileName")
+    }
+
+    private fun functionBody(source: String, signature: String): String {
+        val start = source.indexOf(signature)
+        require(start >= 0) { "Missing source signature: $signature" }
+        val openingBrace = if ('{' in signature) {
+            source.indexOf('{', start)
+        } else {
+            val openingParenthesis = source.indexOf('(', start)
+            require(openingParenthesis >= 0) { "Missing function parameter list: $signature" }
+            var parenthesisDepth = 0
+            var closingParenthesis = -1
+            for (index in openingParenthesis until source.length) {
+                when (source[index]) {
+                    '(' -> parenthesisDepth += 1
+                    ')' -> {
+                        parenthesisDepth -= 1
+                        if (parenthesisDepth == 0) {
+                            closingParenthesis = index
+                            break
+                        }
+                    }
+                }
+            }
+            require(closingParenthesis >= 0) { "Unterminated function parameter list: $signature" }
+            source.indexOf('{', closingParenthesis)
+        }
+        require(openingBrace >= 0) { "Missing function body: $signature" }
+        var depth = 0
+        for (index in openingBrace until source.length) {
+            when (source[index]) {
+                '{' -> depth += 1
+                '}' -> {
+                    depth -= 1
+                    if (depth == 0) return source.substring(start, index + 1)
+                }
+            }
+        }
+        error("Unterminated function body: $signature")
+    }
+}

@@ -1,0 +1,423 @@
+package com.muyuchat.mca
+
+import com.muyuchat.core.deviceprofile.QnnRuntimeProfileSelector
+import com.muyuchat.core.deviceprofile.QnnRuntimeStatus
+import java.io.File
+import java.security.MessageDigest
+import org.json.JSONArray
+import org.json.JSONObject
+
+/**
+ * Chooses directories for image-graph smoke without allowing a generic APK
+ * runtime to shadow a coherent runtime shipped beside the model bundle.
+ *
+ * A bundle directory is promoted only when it contains one complete HTP
+ * profile: System, HTP, and a matching-version Skel + Stub.  Merely finding a
+ * newer Skel is intentionally not enough, because QNN retains a mixed HTP
+ * selection in the process and later reports incompatible context binaries.
+ */
+internal data class QnnImageBundleRuntimeProfile(
+    val directory: File,
+    val htpArchVersion: Int
+)
+
+internal data class QnnImageSmokeRuntimeSelection(
+    val directories: List<String>,
+    val bundleProfile: QnnImageBundleRuntimeProfile?
+)
+
+internal data class QnnImagePackagedRuntimeCandidate(
+    val runtimeProfile: SdxlQnnRuntimeProfile
+) {
+    val htpArchVersion: Int get() = runtimeProfile.htpArchVersion
+    val directories: List<String>
+        get() = if (runtimeProfile.hostDirectory == runtimeProfile.dspDirectory) {
+            listOf(runtimeProfile.hostDirectory)
+        } else {
+            listOf(runtimeProfile.hostDirectory, runtimeProfile.dspDirectory)
+        }
+}
+
+/**
+ * Enumerates every executable packaged runtime tuple. Device-derived HTP
+ * architecture is only an ordering hint; it never removes another coherent
+ * host/DSP profile. SDXL requires an exact Skel + Stub pair even though the
+ * general device-profile inspector intentionally keeps Stub optional.
+ */
+internal fun qnnImagePackagedRuntimeCandidates(
+    searchDirectories: List<File>,
+    preferredHtpArchVersion: Int? = null
+): List<QnnImagePackagedRuntimeCandidate> =
+    QnnRuntimeProfileSelector.candidates(searchDirectories, preferredHtpArchVersion)
+        .asSequence()
+        .filter { profile -> profile.htpStubLibrary?.isFile == true }
+        .map { profile ->
+            val host = profile.hostDirectory.canonicalPath
+            val dsp = profile.dspDirectory.canonicalPath
+            QnnImagePackagedRuntimeCandidate(
+                runtimeProfile = SdxlQnnRuntimeProfile(
+                    hostDirectory = host,
+                    dspDirectory = dsp,
+                    htpArchVersion = profile.htpArchVersion
+                )
+            )
+        }
+        .toList()
+
+internal fun qnnImageSmokeRuntimeSelection(
+    bundleRoot: File?,
+    runtimeStatus: QnnRuntimeStatus
+): QnnImageSmokeRuntimeSelection {
+    val bundleProfile = bundleRoot?.let(::coherentQnnImageBundleRuntimeProfileOrNull)
+    val selectedDirectories = buildList {
+        bundleProfile?.directory?.absolutePath?.let(::add)
+        listOf(
+            runtimeStatus.qnnSystemLibraryPath,
+            runtimeStatus.qnnHtpLibraryPath,
+            runtimeStatus.htpSkelLibraryPath,
+            runtimeStatus.htpStubLibraryPath
+        ).mapNotNull { path -> path?.let(::File)?.parentFile?.absolutePath }
+            .forEach(::add)
+        addAll(runtimeStatus.searchDirectories)
+    }.canonicalDistinctDirectories()
+    return QnnImageSmokeRuntimeSelection(
+        directories = selectedDirectories,
+        bundleProfile = bundleProfile
+    )
+}
+
+internal fun qnnImageSmokeRuntimeDirectories(
+    bundleRoot: File?,
+    runtimeStatus: QnnRuntimeStatus
+): List<String> = qnnImageSmokeRuntimeSelection(bundleRoot, runtimeStatus).directories
+
+/**
+ * Returns a runtime only when its host pair and the exact HTP Skel/Stub pair
+ * live together.  Callers that need to make the runtime linker-loadable must
+ * still stage this profile into app-private storage first.
+ */
+internal fun coherentQnnImageBundleRuntimeProfileOrNull(bundleRoot: File): QnnImageBundleRuntimeProfile? {
+    return qnnImageBundleRuntimeCandidateDirectories(bundleRoot).asSequence()
+        .mapNotNull(::completeProfileInDirectoryOrNull)
+        .maxByOrNull(QnnImageBundleRuntimeProfile::htpArchVersion)
+}
+
+/** Returns the exact architecture profile required by a persisted bundle contract. */
+internal fun qnnImageBundleRuntimeProfileForArchOrNull(
+    bundleRoot: File,
+    htpArchVersion: Int
+): QnnImageBundleRuntimeProfile? =
+    qnnImageBundleRuntimeCandidateDirectories(bundleRoot).asSequence()
+        .mapNotNull { directory -> completeProfileInDirectoryOrNull(directory, htpArchVersion) }
+        .firstOrNull()
+
+/** Enumerates every complete packaged HTP transport without ranking by device identity. */
+internal fun qnnImageBundleRuntimeProfiles(bundleRoot: File): List<QnnImageBundleRuntimeProfile> =
+    qnnImageBundleRuntimeCandidateDirectories(bundleRoot).asSequence()
+        .flatMap { directory ->
+            directory.listFiles().orEmpty().asSequence()
+                .mapNotNull { file ->
+                    HTP_SKEL_NAME.matchEntire(file.name)
+                        ?.groupValues
+                        ?.getOrNull(1)
+                        ?.toIntOrNull()
+                }
+                .distinct()
+                .mapNotNull { arch -> completeProfileInDirectoryOrNull(directory, arch) }
+        }
+        .distinctBy { profile -> profile.directory.canonicalPath to profile.htpArchVersion }
+        .sortedByDescending(QnnImageBundleRuntimeProfile::htpArchVersion)
+        .toList()
+
+internal fun qnnRequiredBundleRuntimeReadinessMessage(
+    bundleRoot: File,
+    profile: LocalImageQnnRuntimeProfile?
+): String? {
+    val required = profile?.takeIf { it.completeBundleRuntime } ?: return null
+    return qnnRequiredBundleRuntimeResolution(bundleRoot, required).error
+}
+
+internal data class QnnRequiredBundleRuntimeResolution(
+    val runtimeProfile: QnnImageBundleRuntimeProfile? = null,
+    val error: String? = null
+)
+
+/**
+ * Resolves a contract-bound runtime only after checking its public metadata
+ * and every library digest.  The HTP filename alone cannot distinguish two
+ * incompatible QNN SDK releases that target the same architecture.
+ */
+internal fun qnnRequiredBundleRuntimeResolution(
+    bundleRoot: File,
+    required: LocalImageQnnRuntimeProfile
+): QnnRequiredBundleRuntimeResolution {
+    val publicRuntime = qnnPublicNpuRuntimeName(required.htpArch)
+    val runtimeProfile = qnnImageBundleRuntimeProfileForArchOrNull(bundleRoot, required.htpArch)
+        ?: return QnnRequiredBundleRuntimeResolution(
+            error = "缺少完整的 $publicRuntime。请重新下载包含 QNN ${required.qnnSdk} 运行库的模型包。"
+        )
+    val metadataFile = File(runtimeProfile.directory, QNN_RUNTIME_METADATA_FILE)
+    if (!metadataFile.isFile) {
+        return QnnRequiredBundleRuntimeResolution(
+            error = "$publicRuntime 的校验信息缺失，无法确认 QNN ${required.qnnSdk} 版本和完整性。" +
+                "请重新下载完整模型包。"
+        )
+    }
+    val metadata = runCatching { JSONObject(metadataFile.readText(Charsets.UTF_8)) }.getOrElse {
+        return QnnRequiredBundleRuntimeResolution(
+            error = "$publicRuntime 的校验信息格式无效。请重新下载完整模型包。"
+        )
+    }
+    if (metadata.optString("schema") != QNN_RUNTIME_METADATA_SCHEMA) {
+        return QnnRequiredBundleRuntimeResolution(
+            error = "$publicRuntime 的校验信息版本不兼容。请更新应用或重新下载模型包。"
+        )
+    }
+    val actualSdk = metadata.optString("qnnSdk").trim()
+    if (actualSdk != required.qnnSdk) {
+        return QnnRequiredBundleRuntimeResolution(
+            error = "$publicRuntime 的 QNN 版本不兼容：模型要求 ${required.qnnSdk}，" +
+                "模型包提供 ${actualSdk.ifBlank { "未声明" }}。"
+        )
+    }
+    val actualArch = metadata.optInt("htpArch", 0)
+    if (actualArch != required.htpArch) {
+        return QnnRequiredBundleRuntimeResolution(
+            error = "$publicRuntime 的 HTP 组件版本不匹配：context 要求 V${required.htpArch}，" +
+                "运行库清单声明 V${actualArch.takeIf { it > 0 } ?: "未声明"}。请修复或重新下载完整模型包。"
+        )
+    }
+    val hashes = metadata.optJSONObject("files")
+        ?: return QnnRequiredBundleRuntimeResolution(
+            error = "$publicRuntime 缺少 QNN 运行库的 SHA-256 校验清单。请重新下载完整模型包。"
+        )
+    // The metadata sidecar is the readiness gate for a downloaded QNN bundle.
+    // QAIRT 2.39+ needs the versioned host transport (for example
+    // libQnnHtpV79.so) in addition to the common System/HTP pair and the
+    // Skel/Stub files.  Verifying only the four generic files lets an archive
+    // with a missing versioned transport appear complete, then fail later
+    // during native staging.  Use the declared SDK to validate the exact
+    // transport set before advertising the bundle as ready.
+    (qnnImageRuntimeFileNames(required.htpArch) +
+        qnnImageTransportRuntimeFileNames(required.htpArch, actualSdk))
+        .distinct()
+        .forEach { name ->
+        val declared = when (val entry = hashes.opt(name)) {
+            is String -> entry
+            is JSONObject -> entry.optString("sha256")
+            else -> ""
+        }.trim().lowercase()
+        if (!QNN_SHA256.matches(declared)) {
+            return QnnRequiredBundleRuntimeResolution(
+                error = "$publicRuntime 缺少 QNN 运行库文件 $name 的有效校验信息。" +
+                    "请重新下载完整模型包。"
+            )
+        }
+        val file = File(runtimeProfile.directory, name)
+        if (!file.isFile || file.length() <= 0L) {
+            return QnnRequiredBundleRuntimeResolution(
+                error = "$publicRuntime 缺少必要的 QNN 运行库文件 $name。" +
+                    "请重新下载包含完整运行库的模型包。"
+            )
+        }
+        val actual = file.qnnRuntimeSha256()
+        if (actual != declared) {
+            return QnnRequiredBundleRuntimeResolution(
+                error = "$publicRuntime 的 $name 完整性校验失败：expected SHA-256=$declared，" +
+                    "actual SHA-256=$actual。请重新下载完整模型包。"
+            )
+        }
+    }
+    return QnnRequiredBundleRuntimeResolution(runtimeProfile = runtimeProfile)
+}
+
+/**
+ * Publisher archives do not contain MCA's verification sidecar. For a catalog
+ * archive whose size and SHA-256 were pinned and verified before extraction,
+ * create the sidecar from the extracted runtime bytes. Subsequent readiness
+ * and staging still verify every library digest, so the generated metadata is
+ * not a bypass for mutable or manually imported bundles.
+ */
+internal fun writePinnedQnnRuntimeMetadata(
+    bundleRoot: File,
+    qnnSdk: String,
+    contextHtpArch: Int,
+    sourceArchiveSha256: String
+): File {
+    require(QNN_SHA256.matches(sourceArchiveSha256.lowercase())) {
+        "A pinned source archive SHA-256 is required before creating QNN runtime metadata."
+    }
+    val profile = qnnImageBundleRuntimeProfileForArchOrNull(bundleRoot, contextHtpArch)
+        ?: error("The downloaded QNN package is missing its generic context runtime profile.")
+    val files = JSONObject()
+    // Keep the generated sidecar in sync with the staging contract.  In
+    // particular, a 2.39+ package is not complete without its versioned host
+    // transport library; emitting metadata without that file would defer a
+    // deterministic integrity error until after download/import.
+    (qnnImageRuntimeFileNames(contextHtpArch) +
+        qnnImageTransportRuntimeFileNames(contextHtpArch, qnnSdk))
+        .distinct()
+        .forEach { name ->
+        val file = File(profile.directory, name)
+        require(file.isFile && file.length() > 0L) { "Missing QNN runtime file: $name" }
+        files.put(name, file.qnnRuntimeSha256())
+    }
+    val availableProfiles = qnnImageBundleRuntimeCandidateDirectories(bundleRoot).asSequence()
+        .flatMap { directory ->
+            directory.listFiles().orEmpty().asSequence().mapNotNull { file ->
+                HTP_SKEL_NAME.matchEntire(file.name)?.groupValues?.getOrNull(1)?.toIntOrNull()
+                    ?.takeIf { arch -> File(directory, "libQnnHtpV${arch}Stub.so").isFile }
+            }
+        }
+        .distinct()
+        .sorted()
+        .toList()
+    val metadata = JSONObject()
+        .put("schema", QNN_RUNTIME_METADATA_SCHEMA)
+        .put("qnnSdk", qnnSdk)
+        .put("htpArch", contextHtpArch)
+        .put("sourceArchiveSha256", sourceArchiveSha256.lowercase())
+        .put("availableHtpArchs", JSONArray(availableProfiles))
+        .put("files", files)
+    val target = File(profile.directory, QNN_RUNTIME_METADATA_FILE)
+    val partial = File(profile.directory, ".$QNN_RUNTIME_METADATA_FILE.part")
+    partial.writeText(metadata.toString(2), Charsets.UTF_8)
+    if (target.exists()) require(target.delete()) { "Unable to replace stale QNN runtime metadata." }
+    require(partial.renameTo(target)) { "Unable to publish QNN runtime metadata." }
+    return target
+}
+
+private fun qnnImageBundleRuntimeCandidateDirectories(bundleRoot: File): Set<File> {
+    val root = runCatching { bundleRoot.canonicalFile }.getOrNull()
+        ?.takeIf(File::isDirectory)
+        ?: return emptySet()
+    val candidates = linkedSetOf<File>()
+    fun addCandidate(candidate: File?) {
+        val canonical = runCatching { candidate?.canonicalFile }.getOrNull()
+            ?.takeIf(File::isDirectory)
+            ?: return
+        if (canonical.path == root.path || canonical.path.startsWith(root.path + File.separator)) {
+            candidates += canonical
+        }
+    }
+    // The documented layout is bundle/runtime. Also accept a versioned ABI
+    // directory or a root-level profile when all four exact artifacts coexist.
+    addCandidate(File(root, "runtime"))
+    addCandidate(root)
+    root.walkTopDown()
+        .maxDepth(3)
+        .filter { it.isFile && it.name == QNN_SYSTEM_LIBRARY }
+        .forEach { file -> addCandidate(file.parentFile) }
+    return candidates
+}
+
+private fun completeProfileInDirectoryOrNull(directory: File): QnnImageBundleRuntimeProfile? {
+    if (!File(directory, QNN_SYSTEM_LIBRARY).isFile || !File(directory, QNN_HTP_LIBRARY).isFile) {
+        return null
+    }
+    val versions = directory.listFiles()
+        ?.asSequence()
+        ?.mapNotNull { file -> HTP_SKEL_NAME.matchEntire(file.name)?.groupValues?.getOrNull(1)?.toIntOrNull() }
+        ?.sortedDescending()
+        ?.toList()
+        .orEmpty()
+    val arch = versions.firstOrNull { version ->
+        File(directory, "libQnnHtpV${version}Skel.so").isFile &&
+            File(directory, "libQnnHtpV${version}Stub.so").isFile
+    } ?: return null
+    return QnnImageBundleRuntimeProfile(directory = directory, htpArchVersion = arch)
+}
+
+private fun completeProfileInDirectoryOrNull(
+    directory: File,
+    htpArchVersion: Int
+): QnnImageBundleRuntimeProfile? {
+    if (htpArchVersion <= 0 ||
+        !File(directory, QNN_SYSTEM_LIBRARY).isFile ||
+        !File(directory, QNN_HTP_LIBRARY).isFile ||
+        !File(directory, "libQnnHtpV${htpArchVersion}Skel.so").isFile ||
+        !File(directory, "libQnnHtpV${htpArchVersion}Stub.so").isFile
+    ) {
+        return null
+    }
+    return QnnImageBundleRuntimeProfile(directory = directory, htpArchVersion = htpArchVersion)
+}
+
+private fun List<String>.canonicalDistinctDirectories(): List<String> =
+    asSequence()
+        .filter(String::isNotBlank)
+        .map { path ->
+            runCatching { File(path).canonicalPath }.getOrElse { File(path).absolutePath }
+        }
+        .distinct()
+        .toList()
+
+internal fun qnnImageRuntimeFileNames(htpArchVersion: Int): List<String> = listOf(
+    QNN_SYSTEM_LIBRARY,
+    QNN_HTP_LIBRARY,
+    "libQnnHtpV${htpArchVersion}Skel.so",
+    "libQnnHtpV${htpArchVersion}Stub.so"
+)
+
+internal fun qnnImageTransportRuntimeFileNames(htpArchVersion: Int): List<String> = buildList {
+    addAll(qnnImageTransportRuntimeFileNames(htpArchVersion, qnnSdk = null))
+}
+
+internal fun qnnImageTransportRuntimeFileNames(
+    htpArchVersion: Int,
+    qnnSdk: String?
+): List<String> = buildList {
+    // QAIRT 2.39/2.45 packages require a versioned host-side transport
+    // library on V79+ devices. The publisher's generic QNN 2.28 archive uses
+    // the common libQnnHtp.so plus an exact device Skel/Stub pair.
+    val requiresVersionedTransport = htpArchVersion >= 79 &&
+        (qnnSdk == null || qnnSdkVersionAtLeast(qnnSdk, major = 2, minor = 39))
+    if (requiresVersionedTransport) add("libQnnHtpV${htpArchVersion}.so")
+    add("libQnnHtpV${htpArchVersion}Skel.so")
+    add("libQnnHtpV${htpArchVersion}Stub.so")
+}
+
+internal fun qnnSdkForRuntimeProfile(profile: QnnImageBundleRuntimeProfile): String? =
+    runCatching {
+        JSONObject(File(profile.directory, QNN_RUNTIME_METADATA_FILE).readText(Charsets.UTF_8))
+            .optString("qnnSdk")
+            .trim()
+            .takeIf(String::isNotEmpty)
+    }.getOrNull()
+
+private fun qnnSdkVersionAtLeast(value: String, major: Int, minor: Int): Boolean {
+    val parts = value.split('.', '-', '_')
+    val actualMajor = parts.getOrNull(0)?.toIntOrNull() ?: return true
+    val actualMinor = parts.getOrNull(1)?.toIntOrNull() ?: return true
+    return actualMajor > major || (actualMajor == major && actualMinor >= minor)
+}
+
+private fun File.qnnRuntimeSha256(): String =
+    MessageDigest.getInstance("SHA-256").let { digest ->
+        inputStream().buffered().use { input ->
+            val buffer = ByteArray(128 * 1024)
+            while (true) {
+                val count = input.read(buffer)
+                if (count < 0) break
+                digest.update(buffer, 0, count)
+            }
+        }
+        digest.digest().joinToString("") { byte -> "%02x".format(byte.toInt() and 0xff) }
+    }
+
+internal fun qnnPublicNpuRuntimeName(htpArchVersion: Int): String = when (htpArchVersion) {
+    68 -> "骁龙 888 / 骁龙 888+ NPU 运行环境"
+    69 -> "骁龙 8 Gen 1 / 骁龙 8+ Gen 1 NPU 运行环境"
+    73 -> "骁龙 8 Gen 2 NPU 运行环境"
+    75 -> "骁龙 8 Gen 3 NPU 运行环境"
+    79 -> "骁龙 8 Elite / 8s Gen 4 NPU 运行环境"
+    81 -> "骁龙 8 Elite Gen 5 NPU 运行环境"
+    else -> "当前设备的骁龙 NPU 运行环境"
+}
+
+private const val QNN_SYSTEM_LIBRARY = "libQnnSystem.so"
+private const val QNN_HTP_LIBRARY = "libQnnHtp.so"
+internal const val QNN_RUNTIME_METADATA_FILE = "mca_qnn_runtime.json"
+internal const val QNN_RUNTIME_METADATA_SCHEMA = "mca.qnn.runtime.v1"
+private val QNN_SHA256 = Regex("^[0-9a-f]{64}$")
+private val HTP_SKEL_NAME = Regex("""^libQnnHtpV(\d+)Skel\.so$""")

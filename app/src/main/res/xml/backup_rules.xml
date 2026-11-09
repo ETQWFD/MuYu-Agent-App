@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="utf-8"?>
+<full-backup-content>
+    <!-- Runtime profiles are valid only for this installation/device capability scope. -->
+    <exclude domain="database" path="mca-runtime.db" />
+    <exclude domain="database" path="mca-runtime.db-wal" />
+    <exclude domain="database" path="mca-runtime.db-shm" />
+    <exclude domain="database" path="mca-runtime.db-journal" />
+    <!-- Image history can contain installation-local content grants and native metadata. -->
+    <exclude domain="database" path="mca.db" />
+    <exclude domain="database" path="mca.db-wal" />
+    <exclude domain="database" path="mca.db-shm" />
+    <exclude domain="database" path="mca.db-journal" />
+    <!-- Product images use the explicit, sanitized image-library export format. -->
+    <exclude domain="file" path="image_assets" />
+    <exclude domain="file" path="image_execution_journal" />
+    <exclude domain="file" path="image_generation_inputs" />
+    <exclude domain="file" path="image_loras" />
+    <exclude domain="file" path="image_upscalers" />
+    <exclude domain="file" path="image_models" />
+    <exclude domain="external" path="image_models" />
+    <exclude domain="file" path="chat_sessions.json" />
+    <!-- Agent workspaces hold user-imported snapshots, payloads and artifacts; they move only
+         through the explicit Agent export format (architecture 10.2/10.6). -->
+    <exclude domain="file" path="agent" />
+    <!-- DSH owns its official home/workspace/config/log tree; it may contain user prompts,
+         credentials configured inside DSH and plugin state. It moves only through an explicit,
+         separately reviewed export, never through Android backup or device transfer. -->
+    <exclude domain="file" path="dsh" />
+    <!-- Credentials and installation-local paths must never cross backup/restore boundaries. -->
+    <exclude domain="sharedpref" path="mca_api.xml" />
+    <exclude domain="sharedpref" path="mca_cloud_api.xml" />
+    <exclude domain="sharedpref" path="mca_web_search.xml" />
+    <exclude domain="sharedpref" path="mca_web_search_diagnostics.xml" />
+    <exclude domain="sharedpref" path="mca_local_api_idempotency_journal.xml" />
+    <exclude domain="sharedpref" path="mca_local_image_models.xml" />
+    <exclude domain="sharedpref" path="image_loras_v1.xml" />
+    <exclude domain="sharedpref" path="image_upscalers_v1.xml" />
+    <exclude domain="sharedpref" path="image_upscaler_product_selection_v1.xml" />
+    <exclude domain="sharedpref" path="mca_image_generation_ui_parameters.xml" />
+</full-backup-content>

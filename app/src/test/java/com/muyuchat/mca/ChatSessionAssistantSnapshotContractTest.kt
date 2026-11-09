@@ -1,0 +1,144 @@
+package com.muyuchat.mca
+
+import java.io.File
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
+import org.junit.Test
+
+class ChatSessionAssistantSnapshotContractTest {
+    @Test
+    fun snapshotIsReadFromLegacyAndRoomPathsAndWrittenBackToRoom() {
+        // The write-back assertion below moved to ChatSessionPersistenceMapping, the column
+        // declaration to ChatSessionStoreEntities and the Room session projection to
+        // ChatSessionStoreDao when the store was split; the other assertions are still in
+        // ChatSessionStore. Reading all of them keeps the same contract under test -- the
+        // assertions themselves are unchanged.
+        val source = sourceFile("ChatSessionStore.kt") +
+            sourceFile("ChatSessionPersistenceMapping.kt") +
+            sourceFile("ChatSessionStoreEntities.kt") +
+            sourceFile("ChatSessionStoreDao.kt")
+
+        assertTrue(source.contains("optString(\"assistantSnapshotJson\")"))
+        assertTrue(source.contains("optJSONObject(\"assistantSnapshot\")?.toString()"))
+        assertTrue(source.contains("session.assistantSnapshotJson"))
+        assertTrue(source.contains("val assistantSnapshotJson: String? = null"))
+        assertTrue(source.contains("assistantSnapshotJson = assistantSnapshot?.toJsonString()"))
+    }
+
+    @Test
+    fun activeConversationUsesItsSnapshotForTheRequestAndPrefixCache() {
+        // P3 step 1 moved the startGeneration execution body to ChatExecutionOperations;
+        // sendMessage moved to ChatWorkflowCoordinator; the snapshot/prefix-cache assertions
+        // are unchanged -- the generation and send halves are read where they now live.
+        val source = sourceFile("ChatWorkflowCoordinator.kt")
+        val execution = sourceFile("ChatExecutionOperations.kt")
+        val startGeneration = functionBody(execution, "ChatGenerationExecutionPort.runChatGeneration")
+        val sendMessage = functionBody(source, "sendPreparedMessageAsync")
+
+        assertTrue(functionBody(source, "sendPreparedMessage")
+            .contains("sendPreparedMessageAsync(viewModel, state, preparedInput)"))
+        assertTrue(startGeneration.contains("val frozenSession = initialState.chatSessions.first"))
+        assertTrue(startGeneration.contains("val frozenAssistantSnapshot = requireNotNull(frozenSession.assistantSnapshot)"))
+        assertTrue(startGeneration.contains("val assistantSnapshot = frozenAssistantSnapshot"))
+        assertTrue(startGeneration.contains("val requestParams = assistantSnapshot?.applyTo(baseParams) ?: baseParams"))
+        assertTrue(startGeneration.contains("assistantId = assistantSnapshot?.assistantId"))
+        assertTrue(startGeneration.contains("persistentLlamaPrefix"))
+        assertTrue(sendMessage.contains("val assistantSnapshot = state.activeAssistantSnapshot()"))
+        assertTrue(sendMessage.contains("assistantSnapshot = assistantSnapshot"))
+    }
+
+    @Test
+    fun replacingAnActivePersonaInvalidatesTheLocalConversationKv() {
+        val source = sourceFile("MainViewModel.kt")
+        val assistantOpsSource = sourceFile("AssistantProfileOperations.kt")
+
+        assertTrue(functionBody(source, "selectAssistant")
+            .contains("newChatForAssistant(assistant, bindDefaultModel = true)"))
+        val vmNewChat = functionBody(source, "newChatForAssistant")
+        val coordinatorNewChat = functionBody(sourceFile("ChatSessionManagementCoordinator.kt"), "newChatForAssistant")
+        assertTrue(vmNewChat.contains("chatSessionManagementCoordinator.newChatForAssistant(assistant, bindDefaultModel)"))
+        assertFalse(vmNewChat.contains("markLocalConversationContextInvalid()"))
+        assertTrue(coordinatorNewChat.contains("markLocalConversationContextInvalid = markLocalConversationContextInvalid"))
+        assertFalse(coordinatorNewChat.contains("markLocalConversationContextInvalid()"))
+        assertTrue(functionBody(sourceFile("ChatSessionLifecycleOperations.kt"), "newChatForAssistantFor")
+            .contains("markLocalConversationContextInvalid()"))
+        assertTrue(functionBody(assistantOpsSource, "finishCharacterCardImportFor")
+            .contains("selectAssistant(assistant.id)"))
+    }
+
+    @Test
+    fun `editing a non-selected assistant does not rebind the active conversation`() {
+        val body = functionBody(sourceFile("AssistantProfileOperations.kt"), "saveAssistantProfileFor")
+
+        assertTrue(body.contains("val shouldSelectAssistant = existing == null || existing.id == state.selectedAssistantId"))
+        assertTrue(body.contains("val applyToActiveConversation = existing != null && shouldSelectAssistant &&"))
+        assertTrue(body.contains("activeSession?.assistantId == assistant.id"))
+        assertTrue(body.contains("activeSession?.mixedAssistantHistory == false"))
+        assertTrue(body.contains("if (applyToActiveConversation)"))
+    }
+
+    @Test
+    fun characterCardImportReportsWorldBookFailureWithoutRollingBackTheAssistant() {
+        val body = functionBody(sourceFile("AssistantProfileOperations.kt"), "finishCharacterCardImportFor")
+
+        val assistantCommit = body.indexOf("assistantStore.saveAssistants(updatedAssistants)")
+        val worldBookPublish = body.indexOf("worldBookStore.upsert(book)")
+
+        assertTrue(assistantCommit >= 0)
+        assertTrue(worldBookPublish > assistantCommit)
+        assertFalse(body.contains("assistantStore.saveAssistants(state.assistants)"))
+        assertTrue(body.contains("embeddedCharacterBookStatusSuffix"))
+        assertTrue(body.contains("embeddedWorldBookSaveError"))
+    }
+
+    @Test
+    fun embeddedWorldBookParserResultIsIncludedInTheVisibleImportStatus() {
+        // The character book parser moved to TextualInversionLibrary.kt during P2. All four
+        // assertions are unchanged -- only the file they read.
+        val source = sourceFile("TextualInversionLibrary.kt")
+
+        assertTrue(source.contains("internal fun parseEmbeddedCharacterBook("))
+        assertTrue(source.contains("internal fun embeddedCharacterBookStatusSuffix("))
+        assertTrue(source.contains("result.error"))
+        assertTrue(source.contains("角色卡已成功导入"))
+    }
+
+    @Test
+    fun openingAConversationPrefersItsCapturedAssistantIdentity() {
+        val source = sourceFile("MainViewModel.kt")
+
+        // The decision moved to SelectChatSessionOperations.kt; the assertion is unchanged, only the
+        // file it reads. The wrapper that stays behind contains no logic to assert on.
+        assertTrue(functionBody(sourceFile(NEW_FILE), "selectChatSession")
+            .contains("session.assistantSnapshot?.assistantId ?: session.assistantId"))
+    }
+
+    private fun functionBody(source: String, name: String): String {
+        val declaration = source.indexOf("fun $name")
+        require(declaration >= 0) { "Missing function $name" }
+        val openingBrace = source.indexOf('{', declaration)
+        var depth = 0
+        for (index in openingBrace until source.length) {
+            when (source[index]) {
+                '{' -> depth++
+                '}' -> {
+                    depth--
+                    if (depth == 0) return source.substring(openingBrace + 1, index)
+                }
+            }
+        }
+        error("Unterminated function $name")
+    }
+
+    private fun sourceFile(name: String): String = sequenceOf(
+        File("src/main/java/com/muyuchat/mca/$name"),
+        File("app/src/main/java/com/muyuchat/mca/$name"),
+        // Repository-relative form, for files outside the flat app package.
+        File(name)
+    ).firstOrNull(File::isFile)?.readText(Charsets.UTF_8)
+        ?: error("Unable to locate $name")
+
+    private companion object {
+        const val NEW_FILE = "src/main/java/com/muyuchat/mca/SelectChatSessionOperations.kt"
+    }
+}

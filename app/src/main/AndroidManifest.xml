@@ -1,0 +1,252 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+    <!-- DSH Android capability bridge (D16). These are user-granted appop/system permissions the
+         official dsh-tool-android package can use; a missing grant is reported as DENIED, never
+         used for device admission. WRITE_SETTINGS/PACKAGE_USAGE_STATS are appop-style, so lint
+         would otherwise flag them as signature permissions. -->
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+    <uses-permission
+        android:name="android.permission.WRITE_SETTINGS"
+        tools:ignore="ProtectedPermissions" />
+    <uses-permission
+        android:name="android.permission.PACKAGE_USAGE_STATS"
+        tools:ignore="ProtectedPermissions" />
+    <uses-sdk tools:overrideLibrary="com.geniex.sdk" />
+    <!-- Match Edge Gallery's optional NPU declaration without making NPU a
+         device-admission requirement; native load remains authoritative. -->
+    <uses-feature android:name="android.hardware.npu" android:required="false" />
+
+    <application
+        android:name=".McaApplication"
+        android:allowBackup="true"
+        android:dataExtractionRules="@xml/data_extraction_rules"
+        android:enableOnBackInvokedCallback="true"
+        android:fullBackupContent="@xml/backup_rules"
+        android:icon="@mipmap/ic_launcher"
+        android:label="@string/app_name"
+        android:roundIcon="@mipmap/ic_launcher_round"
+        android:supportsRtl="true"
+        android:usesCleartextTraffic="true"
+        android:extractNativeLibs="true"
+        android:theme="@style/Theme.MuYuChatAgent">
+
+        <uses-native-library
+            android:name="libcdsprpc.so"
+            android:required="false" />
+
+        <!-- LiteRT-LM GPU is an optional OpenCL transport.  Declaring these
+             libraries keeps CPU-only devices installable; the native engine
+             remains authoritative when GPU initialization is attempted. -->
+        <uses-native-library
+            android:name="libvndksupport.so"
+            android:required="false" />
+        <uses-native-library
+            android:name="libOpenCL.so"
+            android:required="false" />
+
+        <service
+            android:name="com.muyuchat.api.local.LocalLlmService"
+            android:exported="false" />
+
+        <!-- D16: the official android_overlay tool's floating window owner (SYSTEM_ALERT_WINDOW).
+             Started only from an authenticated /overlay action; it never pulls the app forward. -->
+        <service
+            android:name=".dsh.overlay.DshOverlayService"
+            android:exported="false"
+            android:stopWithTask="true" />
+
+        <service
+            android:name="androidx.work.impl.foreground.SystemForegroundService"
+            android:foregroundServiceType="dataSync"
+            tools:node="merge" />
+
+        <!-- Initialize downloads on demand so a failed task database cannot prevent the recovery UI. -->
+        <!-- exported="false" is stated here rather than inherited. androidx.startup declares the
+             provider unexported, and the merged manifest resolved to exported="false" before this
+             line was added, so nothing changes at runtime. It is written out because the security
+             property currently depends on a library we do not control: a future androidx.startup
+             release that exported the provider, or renamed it, would silently reopen the surface
+             with no diff here to review. Stating it also clears the ExportedContentProvider lint
+             warning, which was reporting this merge node for not declaring the attribute itself. -->
+        <provider
+            android:name="androidx.startup.InitializationProvider"
+            android:authorities="${applicationId}.androidx-startup"
+            android:exported="false"
+            tools:node="merge">
+            <meta-data android:name="androidx.work.WorkManagerInitializer" tools:node="remove" />
+        </provider>
+
+        <service
+            android:name=".LocalImageWorkerService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse"
+            android:process=":local_image"
+            android:stopWithTask="false">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="local_image_generation" />
+        </service>
+
+        <!-- Native video workflow (proposal mca-native-video-workflow-v1 §7.3): disposable
+             :local_video worker isolates the DSO-global cancel/progress callbacks from the UI
+             and image processes while sharing the same NativeMediaExecutionGate lock domain.
+             The worker only executes physical attempts; the process owner settles all state. -->
+        <service
+            android:name=".video.worker.LocalVideoWorkerService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse"
+            android:process=":local_video"
+            android:stopWithTask="false">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="local_video_generation" />
+        </service>
+
+        <!-- Qwen ships a private MNN SONAME. Keep it out of the UI and image-worker
+             processes so native library resolution cannot collide with MCA's MNN. -->
+        <service
+            android:name=".QwenImage21WorkerService"
+            android:exported="false"
+            android:process=":qwen_image21"
+            android:stopWithTask="false" />
+
+        <!-- SDXL V75 archive contexts are split into disposable processes.
+             Physical HTP transport is selected dynamically; encoder, UNet,
+             and decoder must die in order, and no graph shares an unload lifecycle. -->
+        <service
+            android:name=".SdxlEncoderWorkerService"
+            android:exported="false"
+            android:process=":sdxl_encoder_v75" />
+
+        <service
+            android:name=".SdxlUnetWorkerService"
+            android:exported="false"
+            android:process=":sdxl_unet_v75" />
+
+        <service
+            android:name=".SdxlVaeWorkerService"
+            android:exported="false"
+            android:process=":sdxl_vae_v75" />
+
+        <!-- Unknown QAIRT bundle/chipset/runtime combinations may only create a
+             handle here.  A crash/hang is contained to this disposable process. -->
+        <service
+            android:name=".QairtDryRunWorkerService"
+            android:exported="false"
+            android:process=":qairt_smoke" />
+
+        <!-- Every load-bound smart-tuning candidate is reconstructed from a
+             persisted pending journal and executed in this disposable process. -->
+        <service
+            android:name=".TuningProbeWorkerService"
+            android:exported="false"
+            android:process=":tuning"
+            android:stopWithTask="true" />
+
+        <!-- Long-lived ordinary local text runtimes live outside the UI
+             process. A native crash or hang is contained here and is surfaced
+             to the main process as a Binder/load error. -->
+        <service
+            android:name=".LocalChatWorkerService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse"
+            android:process=":local_chat"
+            android:stopWithTask="false">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="resident_local_ai_model" />
+        </service>
+
+        <!-- LiteRT Qualcomm dispatch must not share a process with GenieX/QAIRT:
+             both stacks publish overlapping QNN SONAMEs and Android's linker
+             retains the first loaded handle for the process lifetime. -->
+        <service
+            android:name=".LiteRtChatWorkerService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse"
+            android:process=":litert_chat"
+            android:stopWithTask="false">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="resident_litert_local_ai_model" />
+        </service>
+
+        <service
+            android:name=".OfflineTranslationWorkerService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse"
+            android:process=":offline_translation"
+            android:stopWithTask="false">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="offline_prompt_translation" />
+        </service>
+
+        <service
+            android:name=".LocalApiForegroundService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse"
+            android:stopWithTask="false">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="local_ai_api_server" />
+        </service>
+
+        <!-- Protects user-started cloud/UI chat work while the activity is in
+             the background. Model and image workers keep their own isolated
+             foreground services; this service only owns process priority and
+             the user-visible task notification. -->
+        <service
+            android:name=".McaGenerationForegroundService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse"
+            android:stopWithTask="false">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="mca_user_generation" />
+        </service>
+
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/image_share_file_paths" />
+        </provider>
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:windowSoftInputMode="adjustResize"
+            android:theme="@style/Theme.MuYuChatAgent">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!-- Disabled by default; the user must enable it in system accessibility settings. -->
+        <service
+            android:name=".agent.device.AgentAccessibilityService"
+            android:exported="true"
+            android:label="MCA Agent UI"
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+            <intent-filter>
+                <action android:name="android.accessibilityservice.AccessibilityService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.accessibilityservice"
+                android:resource="@xml/agent_accessibility_service" />
+        </service>
+    </application>
+</manifest>

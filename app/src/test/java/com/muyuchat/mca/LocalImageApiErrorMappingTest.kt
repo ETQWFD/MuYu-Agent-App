@@ -1,0 +1,225 @@
+package com.muyuchat.mca
+
+import org.json.JSONObject
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
+import org.junit.Test
+
+class LocalImageApiErrorMappingTest {
+    @Test
+    fun `execution contract mismatch does not instruct users to redownload a complete package`() {
+        val detail = "conditioningGraph: expected=model, actual=stable_diffusion_v1_5_text_encoder"
+        listOf(
+            LocalImageWorkerRemoteException(IMAGE_NATIVE_EXECUTION_CONTRACT_INVALID.lowercase(), detail),
+            ImageNativeExecutionContractException(IMAGE_NATIVE_EXECUTION_CONTRACT_INVALID, "conditioningGraph", message = detail)
+        ).forEach { error ->
+            val message = localImageGenerationFailureMessage(error)
+            assertTrue(message.contains("配置不一致"))
+            assertTrue(message.contains("更新应用"))
+            assertTrue(message.contains(detail))
+            assertFalse(message.contains("模型包完整"))
+            assertFalse(message.contains("重新下载"))
+        }
+        val unknown = localImageGenerationFailureMessage(LocalImageWorkerRemoteException("generation_failed", "out of memory"))
+        assertTrue(unknown.contains("out of memory"))
+        assertFalse(unknown.contains("确认模型包完整"))
+    }
+
+    @Test
+    fun `qnn context binary mismatch keeps the native text and adds an actionable next step`() {
+        // Verbatim device text (B-matrix I-B1: SM8550 + snapdragon_8_elite_gen5 bundle).
+        val nativeDetail = "QNN contextCreateFromBinary failed: QNN_CONTEXT_ERROR_CREATE_FROM_BINARY: " +
+            "Failure to create context from binary (0x138d). The context binary may not match this " +
+            "device's QNN runtime, target SoC, or SDK version. Rebuild or download a QNN bundle " +
+            "compiled for the device runtime before enabling NPU image generation. " +
+            "QNN deviceCreate succeeded with default config."
+        val message = localImageGenerationFailureMessage(
+            LocalImageWorkerRemoteException("generation_failed", nativeDetail)
+        )
+        // The original message and its error code survive verbatim for diagnosis.
+        assertTrue(message.contains(nativeDetail))
+        assertTrue(message.contains("0x138d"))
+        assertTrue(message.contains("QNN_CONTEXT_ERROR_CREATE_FROM_BINARY"))
+        // The next step names the real remedy instead of "retry and report".
+        assertTrue(message.contains("模型页"))
+        assertTrue(message.contains("stable-diffusion.cpp"))
+        assertTrue(message.contains("MNN"))
+        assertTrue(message.contains("下一步"))
+    }
+
+    @Test
+    fun `qnn tokenizer failure explains the package condition and the next action`() {
+        val nativeDetail = "QNN CLIP tokenizer returned 0 IDs; expected 154."
+        val message = localImageGenerationFailureMessage(
+            LocalImageWorkerRemoteException("generation_failed", nativeDetail)
+        )
+        assertTrue(message.contains(nativeDetail))
+        assertTrue(message.contains("模型页"))
+        assertTrue(message.contains("重新导入"))
+        assertTrue(message.contains("下一步"))
+    }
+
+    @Test
+    fun `unrecognised native failures keep the generic retry guidance`() {
+        val message = localImageGenerationFailureMessage(
+            LocalImageWorkerRemoteException("generation_failed", "out of memory")
+        )
+        assertTrue(message.contains("out of memory"))
+        assertTrue(message.contains("下一步：重试一次"))
+        assertFalse(message.contains("模型页"))
+    }
+
+    @Test
+    fun `ui worker failures explain the problem and the next action`() {
+        val disconnected = localImageGenerationFailureMessage(
+            LocalImageWorkerDisconnectedException("Local image worker process died.")
+        )
+        assertTrue(disconnected.contains("进程异常退出"))
+        assertTrue(disconnected.contains("校验模型包"))
+
+        val reconnecting = localImageGenerationFailureMessage(
+            LocalImageWorkerDisconnectedException("Local image worker binding died.")
+        )
+        assertTrue(reconnecting.contains("等待 1 秒"))
+        assertTrue(reconnecting.contains("重试"))
+    }
+
+    @Test
+    fun `authenticated image count capability is explicit per runtime`() {
+        assertTrue(supportsAuthenticatedLocalImageCount(LocalImageRuntime.STABLE_DIFFUSION_CPP, 8))
+        assertTrue(supportsAuthenticatedLocalImageCount(LocalImageRuntime.MNN_DIFFUSION, 1))
+        assertTrue(supportsAuthenticatedLocalImageCount(LocalImageRuntime.MNN_DIFFUSION, 2))
+        assertTrue(supportsAuthenticatedLocalImageCount(LocalImageRuntime.QNN_HTP, 8))
+        assertFalse(supportsAuthenticatedLocalImageCount(LocalImageRuntime.STABLE_DIFFUSION_CPP, 9))
+    }
+
+    @Test
+    fun `structured worker errors retain code and select a non generic API status`() {
+        val unsupported = requireNotNull(
+            LocalImageWorkerRemoteException(
+                code = "unsupported_preview",
+                message = "Preview publication is unavailable."
+            ).toLocalImageApiProviderExceptionOrNull()
+        )
+        assertEquals("unsupported_preview", unsupported.code)
+        assertEquals(422, unsupported.httpStatus)
+
+        val timeout = requireNotNull(
+            LocalImageWorkerRemoteException(
+                code = LOCAL_IMAGE_WORKER_WATCHDOG_TIMEOUT_CODE,
+                message = "The native worker timed out."
+            ).toLocalImageApiProviderExceptionOrNull()
+        )
+        assertEquals(504, timeout.httpStatus)
+
+        val disconnected = requireNotNull(
+            LocalImageWorkerDisconnectedException("Worker disconnected.")
+                .toLocalImageApiProviderExceptionOrNull()
+        )
+        assertEquals("image_worker_unavailable", disconnected.code)
+        assertEquals(503, disconnected.httpStatus)
+        assertTrue(disconnected.message.contains("verify", ignoreCase = true))
+        assertTrue(disconnected.message.contains("re-import"))
+
+        val invalidResponse = requireNotNull(
+            LocalImageWorkerException("Worker result was malformed.")
+                .toLocalImageApiProviderExceptionOrNull()
+        )
+        assertEquals("invalid_image_worker_response", invalidResponse.code)
+        assertEquals(502, invalidResponse.httpStatus)
+    }
+
+    @Test
+    fun `worker service preserves product phase and native contract codes`() {
+        assertEquals(
+            "unsupported_batch_count",
+            localImageWorkerErrorCode(
+                LocalImageProductContractException(
+                    code = "unsupported_batch_count",
+                    message = "Only one output is supported."
+                )
+            )
+        )
+        assertEquals(
+            "qnn_sdxl_worker_timeout",
+            localImageWorkerErrorCode(
+                LocalImageWorkerRemoteException(
+                    code = "qnn_sdxl_worker_timeout",
+                    message = "Timed out."
+                )
+            )
+        )
+        assertEquals(
+            "execution_contract_mismatch",
+            localImageWorkerErrorCode(
+                ImageNativeExecutionContractException(
+                    code = EXECUTION_CONTRACT_MISMATCH,
+                    field = "steps",
+                    message = "Native steps did not match."
+                )
+            )
+        )
+    }
+
+    @Test
+    fun `native prompt weighting rejection keeps its code through worker and API mapping`() {
+        val nativeFailure = try {
+            throwLocalImageNativeFailure(
+                JSONObject()
+                    .put("ok", false)
+                    .put("errorCode", "PROMPT_WEIGHTING_EXECUTION_UNSUPPORTED")
+                    .put("error", "The selected graph cannot apply prompt weights."),
+                fallbackMessage = "Generation failed."
+            )
+        } catch (error: LocalImageProductContractException) {
+            error
+        }
+
+        assertEquals("prompt_weighting_execution_unsupported", nativeFailure.code)
+        assertEquals(
+            "prompt_weighting_execution_unsupported",
+            localImageWorkerErrorCode(nativeFailure)
+        )
+        val apiFailure = requireNotNull(nativeFailure.toLocalImageApiProviderExceptionOrNull())
+        assertEquals("prompt_weighting_execution_unsupported", apiFailure.code)
+        assertEquals(422, apiFailure.httpStatus)
+    }
+
+    @Test
+    fun `qnn img2img pndm rejection is a stable 422 product error`() {
+        val apiFailure = requireNotNull(
+            LocalImageProductContractException(
+                code = "unsupported_img2img_sampler",
+                message = "QNN img2img cannot use PNDM/PLMS at a strength-derived index."
+            ).toLocalImageApiProviderExceptionOrNull()
+        )
+
+        assertEquals("unsupported_img2img_sampler", apiFailure.code)
+        assertEquals(422, apiFailure.httpStatus)
+        assertTrue(apiFailure.message.contains("PNDM"))
+    }
+
+    @Test
+    fun `ultrafix resolution rejection keeps its product error code through worker and API`() {
+        val resolutionFailure = ImageProfileResolutionException(
+            ImageProfileValidationReport(
+                listOf(
+                    ImageProfileValidationIssue(
+                        code = "ULTRAFIX_EXECUTION_UNSUPPORTED",
+                        field = "capabilities.supportsUltraFix",
+                        message = "The resolved graph and sampler cannot execute UltraFix dimensions."
+                    )
+                )
+            )
+        )
+
+        assertEquals(
+            "ultrafix_execution_unsupported",
+            localImageWorkerErrorCode(resolutionFailure)
+        )
+        val apiFailure = requireNotNull(resolutionFailure.toLocalImageApiProviderExceptionOrNull())
+        assertEquals("ultrafix_execution_unsupported", apiFailure.code)
+        assertEquals(422, apiFailure.httpStatus)
+    }
+}

@@ -1,0 +1,661 @@
+package com.muyuchat.mca
+
+import java.io.File
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotSame
+import org.junit.Assert.assertSame
+import org.junit.Assert.assertTrue
+import org.junit.Test
+
+class LocalImagePromptCancellationContractTest {
+    @Test
+    fun `prompt preparation failures use fixed public messages and hide internals`() {
+        val expectedMessages = linkedMapOf(
+            "invalid_image_prompt" to
+                "图片提示词长度或内容无效，尚未启动图片生成。",
+            "image_prompt_requires_canonical_english_tags" to
+                "当前模型只接受英文提示词。请将正向和负向提示词改写为英文后重试；本次尚未启动图片生成。",
+            "invalid_image_profile_prompt_language" to
+                "模型默认负向提示词语言不兼容，尚未启动图片生成。",
+            "execution_contract_unsupported" to
+                "当前生成设置与模型执行合同不兼容，尚未启动图片生成。",
+            "image_prompt_translation_input_too_large" to
+                "离线中译英输入过长，尚未启动图片生成。",
+            "image_prompt_translation_input_too_complex" to
+                "离线中译英输入结构过于复杂，尚未启动图片生成。",
+            "image_prompt_translation_busy" to
+                "本地离线翻译运行时正忙，尚未启动图片生成，请稍后重试。",
+            "image_prompt_translation_unavailable" to
+                "没有可核验的本地翻译模型，尚未启动图片生成。",
+            "image_prompt_translation_timeout" to
+                "中文提示词转换超时，尚未启动图片生成。",
+            "image_prompt_translation_invalid" to
+                "翻译结果未通过格式或语义一致性校验，尚未启动图片生成。",
+            "image_prompt_translation_failed" to
+                "中文提示词转换失败，尚未启动图片生成。",
+            LOCAL_IMAGE_PROMPT_TRANSLATION_RELEASE_UNCONFIRMED_CODE to
+                LOCAL_IMAGE_PROMPT_TRANSLATION_RELEASE_UNCONFIRMED_MESSAGE
+        )
+
+        expectedMessages.forEach { (code, expected) ->
+            val internalDetail = "internal translator detail for $code"
+            val actual = localImagePromptPreparationFailureMessage(
+                LocalImageProductContractException(
+                    code = code,
+                    message = internalDetail
+                )
+            )
+            assertEquals(expected, actual)
+            assertFalse(actual.contains(internalDetail))
+        }
+
+        listOf<Exception>(
+            LocalImageProductContractException(
+                code = "unknown_internal_code",
+                message = "native path and parser details"
+            ),
+            IllegalStateException("internal translator detail")
+        ).forEach { error ->
+            val actual = localImagePromptPreparationFailureMessage(error)
+            assertEquals(LOCAL_IMAGE_PROMPT_PREPARATION_FALLBACK_MESSAGE, actual)
+            assertFalse(actual.contains(requireNotNull(error.message)))
+        }
+    }
+
+    @Test
+    fun `standalone local generation uses verified Hy-MT2 before English prompt admission`() {
+        val source = mainViewModelSource()
+        val prepare = functionBody(
+            prepareSource(),
+            "internal suspend fun prepareLocalImagePromptExecution("
+        )
+
+        assertFalse(source.contains("private suspend fun translateLocalImagePrompt("))
+        assertFalse(prepare.contains("LocalImagePromptAlignmentV4"))
+        // The call moved behind the port, so assert BOTH halves of the original intent: the
+        // preparation reaches translation only through the port, and the port is still the single
+        // shared service. Checking just one half would let a second translation path slip in.
+        assertTrue(prepare.contains("port.translate("))
+        // R3-S27: the port became a named adapter; the shared service is reached through a provider.
+        // Both halves are checked where they live: the adapter calls the provider, and the only
+        // provider argument is the single lazy service field.
+        val translationAdapter = sourceFile("CorePortAdapters.kt") + "\n" +
+            sourceFile("ImageGenerationWorkflowPortAdapters.kt")
+        assertTrue(
+            "the port must still be the one shared translation service",
+            translationAdapter.contains("serviceProvider().translate(bundle, request)") &&
+                mainViewModelSource().contains("{ offlinePromptTranslationService }")
+        )
+        assertTrue(prepare.contains("catch (error: OfflinePromptTranslationCleanupException)"))
+        assertTrue(prepare.contains("LOCAL_IMAGE_PROMPT_TRANSLATION_RELEASE_UNCONFIRMED_STATUS"))
+        assertTrue(prepare.contains("OfflinePromptTranslationResolution.Fallback"))
+        // The preview moved to its own file, and the two assertions below were always about the
+        // worker that publishes the cleanup/cancelled statuses rather than about the one-line
+        // entry point. They now read the worker directly; the asserted text is unchanged.
+        val preview = functionBody(
+            sourceFile("app/src/main/java/com/muyuchat/mca/ImagePromptTranslationPreviewOperations.kt"),
+            "internal suspend fun translateImagePromptTextPreview("
+        )
+        assertTrue(preview.contains("catch (error: OfflinePromptTranslationCleanupException)"))
+        assertTrue(preview.contains("LOCAL_IMAGE_PROMPT_TRANSLATION_RELEASE_UNCONFIRMED_STATUS"))
+        assertTrue(prepare.contains("requireLocalImagePromptLanguageAdmission("))
+        assertTrue(prepare.contains("OFFLINE_HY_MT2_ZH_TO_EN"))
+        assertFalse(prepare.contains("legacy V4 LLM prompt translation path"))
+    }
+
+    @Test
+    fun `prompt preparation never acquires the chat runtime lifecycle lease`() {
+        val prepare = functionBody(
+            prepareSource(),
+            "internal suspend fun prepareLocalImagePromptExecution("
+        )
+
+        assertFalse(prepare.contains("acquireExclusiveLifecycleLease("))
+        assertFalse(prepare.contains("engine.streamChat("))
+        assertFalse(prepare.contains("withTimeoutOrNull("))
+        assertFalse(prepare.contains("LOCAL_IMAGE_PROMPT_TRANSLATION_TIMEOUT_MS"))
+    }
+
+    @Test
+    fun `prompt preparation bounds request and final native text before execution`() {
+        val prepare = functionBody(
+            prepareSource(),
+            "internal suspend fun prepareLocalImagePromptExecution("
+        )
+        val originalLimit = prepare.indexOf("if (prompt.length > LocalImagePromptExecution.MAX_ORIGINAL_PROMPT_CHARS")
+        val finalNegative = prepare.indexOf("val finalNegativePrompt = resolveLocalImageFinalNegativePromptForExecution(")
+        val effectiveLimit = prepare.indexOf(
+            "if (finalNegativePrompt.value.length > LocalImagePromptExecution.MAX_EFFECTIVE_PROMPT_CHARS)",
+            finalNegative
+        )
+        val evidence = prepare.indexOf("return LocalImagePromptExecution(", effectiveLimit)
+
+        assertTrue(originalLimit >= 0)
+        assertTrue(finalNegative > originalLimit)
+        assertTrue(effectiveLimit > finalNegative)
+        assertTrue(evidence > effectiveLimit)
+        assertTrue(prepare.contains("LOCAL_IMAGE_PROMPT_TRANSLATION_RELEASE_UNCONFIRMED_CODE"))
+    }
+
+    @Test
+    fun `late prompt failure cannot overwrite cancellation or a different active job`() {
+        val jobId = "prompt-race"
+        val message = "中文提示词转换失败，尚未启动图片生成。"
+        val generatingJobs = listOf(
+            ImageGenerationJobRecord(
+                id = jobId,
+                prompt = "一只红色小鸟",
+                status = ImageGenerationStatusRecord.GENERATING,
+                backend = ImageBackend.LOCAL,
+                message = "正在转换中文提示词"
+            )
+        )
+
+        val failedJobs = generatingJobs.withLocalImagePromptPreparationFailureIfActive(
+            activeJobId = jobId,
+            jobId = jobId,
+            message = message
+        )
+        assertNotSame(generatingJobs, failedJobs)
+        assertEquals(ImageGenerationStatusRecord.FAILED, failedJobs.single().status)
+        assertEquals(message, failedJobs.single().message)
+
+        ImageGenerationStatusRecord.values()
+            .filterNot { status -> status == ImageGenerationStatusRecord.GENERATING }
+            .forEach { interleavedStatus ->
+                val interleavedJobs = generatingJobs.map { job ->
+                    job.copy(status = interleavedStatus, message = "取消路径已取得状态所有权")
+                }
+                val afterLateFailure =
+                    interleavedJobs.withLocalImagePromptPreparationFailureIfActive(
+                        activeJobId = jobId,
+                        jobId = jobId,
+                        message = message
+                    )
+
+                assertSame(interleavedJobs, afterLateFailure)
+                assertEquals(interleavedStatus, afterLateFailure.single().status)
+                assertEquals("取消路径已取得状态所有权", afterLateFailure.single().message)
+            }
+
+        listOf<String?>(null, "new-active-job").forEach { activeJobId ->
+            val reassignedJobs = generatingJobs.withLocalImagePromptPreparationFailureIfActive(
+                activeJobId = activeJobId,
+                jobId = jobId,
+                message = message
+            )
+            assertSame(generatingJobs, reassignedJobs)
+            assertEquals(ImageGenerationStatusRecord.GENERATING, reassignedJobs.single().status)
+        }
+    }
+
+    @Test
+    fun `prompt method is derived from current text encoder and current text`() {
+        assertEquals(
+            LocalImagePromptTransformationMethod.DIRECT,
+            requiredLocalImagePromptTransformationMethod(
+                containsChinese = false,
+                languageCapability = LocalImageTextEncoderLanguageCapability.ENGLISH_DOMINANT
+            )
+        )
+        assertEquals(
+            LocalImagePromptTransformationMethod.NATIVE_MULTILINGUAL,
+            requiredLocalImagePromptTransformationMethod(
+                containsChinese = true,
+                languageCapability = LocalImageTextEncoderLanguageCapability.NATIVE_MULTILINGUAL
+            )
+        )
+        assertEquals(
+            LocalImagePromptTransformationMethod.OFFLINE_HY_MT2_ZH_TO_EN,
+            requiredLocalImagePromptTransformationMethod(
+                containsChinese = true,
+                languageCapability = LocalImageTextEncoderLanguageCapability.ENGLISH_DOMINANT
+            )
+        )
+    }
+
+    @Test
+    fun `captured prompt evidence cannot override the required method`() {
+        val prepare = functionBody(
+            prepareSource(),
+            "internal suspend fun prepareLocalImagePromptExecution("
+        )
+        val derive = prepare.indexOf("val requiredMethod = requiredLocalImagePromptTransformationMethod(")
+        val captured = prepare.indexOf("captured?.let { execution ->")
+        val stableBindingCheck = prepare.indexOf(
+            "execution.promptLanguageBindingFingerprint ==",
+            captured
+        )
+        val methodCheck = prepare.indexOf("execution.method == requiredMethod", stableBindingCheck)
+        val capturedRebind = prepare.indexOf(
+            "execution.rebindToCurrentImageProfile(",
+            methodCheck
+        )
+        val capturedReturn = prepare.indexOf("return rebound.copy(", capturedRebind)
+
+        assertTrue(derive >= 0)
+        assertTrue(captured > derive)
+        assertTrue(stableBindingCheck > captured)
+        assertTrue(methodCheck > stableBindingCheck)
+        assertTrue(capturedRebind > methodCheck)
+        assertTrue(capturedReturn > capturedRebind)
+    }
+
+    @Test
+    fun `prompt evidence full fingerprint is resolved from final effective negative`() {
+        val source = sourceFile("app/src/main/java/com/muyuchat/mca/MainViewModel.kt")
+        val prepare = functionBody(
+            prepareSource(),
+            "internal suspend fun prepareLocalImagePromptExecution("
+        )
+        val finalNegative = prepare.indexOf(
+            "val finalNegativePrompt = resolveLocalImageFinalNegativePromptForExecution("
+        )
+        val effectiveResolver = prepare.indexOf(
+            "fun effectiveExecutionProfile(effectiveNegativePrompt: String)"
+        )
+        val effectiveOverride = prepare.indexOf(
+            "options = profileOptions.copy(negativePrompt = effectiveNegativePrompt)",
+            effectiveResolver
+        )
+        val directOrNative = prepare.indexOf("if (requiredMethod in setOf(", effectiveOverride)
+        val effectiveProfile = prepare.indexOf(
+            "val effectiveProfile = effectiveExecutionProfile(finalNegativePrompt.value)",
+            directOrNative
+        )
+        val evidence = prepare.indexOf("return LocalImagePromptExecution(", effectiveProfile)
+
+        assertTrue(finalNegative >= 0)
+        assertTrue(effectiveResolver >= 0)
+        assertTrue(effectiveResolver > finalNegative)
+        assertTrue(effectiveOverride > effectiveResolver)
+        assertTrue(directOrNative > effectiveOverride)
+        assertTrue(effectiveProfile > directOrNative)
+        assertTrue(evidence > effectiveProfile)
+    }
+
+    @Test
+    fun `main activity validates prompt binding before publishing any image bytes`() {
+        val source = sourceFile("app/src/main/java/com/muyuchat/mca/MainViewModel.kt")
+        val publish = functionBody(
+            localAssetSource(),
+            "suspend fun createLocalGeneratedImageAsset("
+        )
+        val validate = publish.indexOf("validateLocalImagePromptExecutionBinding(")
+        val firstWrite = publish.indexOf("writeImageAssetBytesAtomically(")
+        val attachMetadata = publish.indexOf(".withNativeExecution(port.executionWithQnnVerificationEvidence(")
+
+        assertTrue(validate >= 0)
+        assertTrue(attachMetadata > validate)
+        assertTrue(firstWrite > attachMetadata)
+    }
+
+    @Test
+    fun `authenticated api materializes random seed before prompt preparation`() {
+        val source = sourceFile("app/src/main/java/com/muyuchat/mca/MainViewModel.kt")
+        val api = functionBody(localApiSource(), "internal suspend fun generateLocalApiImageOperations(")
+        val plan = api.indexOf("val batchPlan = planLocalImageBatch(")
+        val prepare = api.indexOf("prepareLocalImagePromptExecution(")
+        val worker = api.indexOf("localImageWorkerClient.generate(")
+
+        assertTrue(plan >= 0)
+        assertTrue(prepare > plan)
+        assertTrue(worker > prepare)
+    }
+
+    @Test
+    fun `persisted translated prompt evidence cannot bypass current phase B verification`() {
+        // Re-creation moved to ImageAssetCreationOperations.kt; the ViewModel keeps a forwarder.
+        val recreate = functionBody(
+            sourceFile("app/src/main/java/com/muyuchat/mca/ImageAssetCreationOperations.kt"),
+            "internal fun recreateAsset("
+        )
+        val captured = recreate.indexOf("promptExecution = history.promptExecution?.takeIf")
+        val trustBoundary = recreate.indexOf(
+            "execution.method.isReusableFromImageHistory()",
+            captured
+        )
+
+        assertTrue(captured >= 0)
+        assertTrue(trustBoundary > captured)
+    }
+
+    @Test
+    fun `UI prompt admission never truncates at six hundred and rejects only the explicit hard limit`() {
+        val enqueue = functionBody(imageGenerationOwnerSource(), "fun submit(") +
+            functionBody(imageGenerationExecutionSource(), "fun runImageGenerationExecution(")
+        val normalization = enqueue.indexOf(".trim()")
+        val hardLimit = enqueue.indexOf("LocalImagePromptExecution.MAX_ORIGINAL_PROMPT_CHARS")
+
+        assertTrue(normalization >= 0)
+        assertFalse(enqueue.contains("take(600)"))
+        assertTrue(hardLimit > normalization)
+        assertTrue("中".repeat(601).length < LocalImagePromptExecution.MAX_ORIGINAL_PROMPT_CHARS)
+        assertTrue("中".repeat(LocalImagePromptExecution.MAX_ORIGINAL_PROMPT_CHARS + 1).length >
+            LocalImagePromptExecution.MAX_ORIGINAL_PROMPT_CHARS
+        )
+    }
+
+    @Test
+    fun `English-dominant Chinese pair is translated before final language admission`() {
+        val prepare = functionBody(
+            prepareSource(),
+            "internal suspend fun prepareLocalImagePromptExecution("
+        )
+        val finalNegative = prepare.indexOf(
+            "val finalNegativePrompt = resolveLocalImageFinalNegativePromptForExecution("
+        )
+        val admission = prepare.indexOf("requireLocalImagePromptLanguageAdmission(", finalNegative)
+        val method = prepare.indexOf("val requiredMethod = requiredLocalImagePromptTransformationMethod(", admission)
+        // The call is reached through the port now; the ordering assertion is unchanged.
+        val translation = prepare.indexOf("port.translate(", method)
+        val translatedAdmission = prepare.indexOf("requireLocalImagePromptLanguageAdmission(", translation)
+        assertTrue(translatedAdmission > translation)
+        val argumentsEnd = prepare.indexOf(')', translatedAdmission)
+        assertTrue(argumentsEnd > translatedAdmission)
+        val translatedArguments = prepare.substring(translatedAdmission, argumentsEnd)
+
+        assertTrue(finalNegative >= 0)
+        assertTrue(admission > finalNegative)
+        assertTrue(method > admission)
+        assertTrue(translation > method)
+        assertTrue(translatedAdmission > translation)
+        assertTrue(Regex("profile\\s*=\\s*profile").containsMatchIn(translatedArguments))
+        assertTrue(Regex("prompt\\s*=\\s*effectivePrompt").containsMatchIn(translatedArguments))
+        assertTrue(Regex("executedNegativePrompt\\s*=\\s*effectiveNegativePrompt").containsMatchIn(translatedArguments))
+        assertFalse(prepare.contains("LocalImagePromptAlignmentV4"))
+        assertTrue(prepare.contains("translation.result.requestFingerprint"))
+        assertTrue(prepare.contains("translation.result.bundleFingerprint"))
+    }
+
+    @Test
+    fun `offline request translates Chinese positive and negative branches without retranslating English`() {
+        val both = offlineImagePromptTranslationRequest(
+            prompt = "一只红色小鸟",
+            finalNegativePrompt = "不要文字"
+        )
+        assertEquals("一只红色小鸟", both.sourceText)
+        assertEquals("不要文字", both.negativePrompt)
+
+        val negativeOnly = offlineImagePromptTranslationRequest(
+            prompt = "a red bird",
+            finalNegativePrompt = "不要文字"
+        )
+        assertEquals("不要文字", negativeOnly.sourceText)
+        assertEquals("", negativeOnly.negativePrompt)
+
+        val positiveOnly = offlineImagePromptTranslationRequest(
+            prompt = "一只红色小鸟",
+            finalNegativePrompt = "text, watermark"
+        )
+        assertEquals("一只红色小鸟", positiveOnly.sourceText)
+        assertEquals("", positiveOnly.negativePrompt)
+    }
+
+    @Test
+    fun `Hy-MT2 success binds English prompt and fallback exits before either image worker`() {
+        val source = mainViewModelSource()
+        val prepare = functionBody(
+            prepareSource(),
+            "internal suspend fun prepareLocalImagePromptExecution("
+        )
+        val enqueue = functionBody(imageGenerationOwnerSource(), "fun submit(") +
+            functionBody(imageGenerationExecutionSource(), "fun runImageGenerationExecution(")
+        val api = functionBody(localApiSource(), "internal suspend fun generateLocalApiImageOperations(")
+
+        assertTrue(prepare.contains("effectivePrompt = translation.translatedPrompt"))
+        assertTrue(prepare.contains("translation.effectiveNegativePrompt"))
+        assertTrue(prepare.contains("throw LocalImageProductContractException("))
+        assertTrue(prepare.contains("OFFLINE_HY_MT2_ZH_TO_EN"))
+
+        val uiPrepare = enqueue.indexOf("prepareLocalImagePromptExecution(")
+        val uiWorker = enqueue.indexOf("localImageWorkerClient.begin(", uiPrepare)
+        assertTrue(uiPrepare >= 0)
+        assertTrue(uiWorker > uiPrepare)
+
+        val apiPrepare = api.indexOf("prepareLocalImagePromptExecution(")
+        val apiWorker = api.indexOf("localImageWorkerClient.generate(", apiPrepare)
+        assertTrue(apiPrepare >= 0)
+        assertTrue(apiWorker > apiPrepare)
+    }
+
+    @Test
+    fun `successful prompt translation remains visible after the image worker starts`() {
+        val enqueue = functionBody(imageGenerationOwnerSource(), "fun submit(") +
+            functionBody(imageGenerationExecutionSource(), "fun runImageGenerationExecution(")
+        val workerStart = enqueue.indexOf("localImageWorkerClient.begin(model.runtime)")
+        val translatedStatus = enqueue.indexOf("val translationStatusMessage = if (", workerStart)
+        val jobMessage = enqueue.indexOf("message = translationStatusMessage ?: job.message", workerStart)
+
+        assertTrue(workerStart >= 0)
+        assertTrue(translatedStatus > workerStart)
+        assertTrue(jobMessage > translatedStatus)
+        assertTrue(enqueue.contains("\"英文译文\" to promptExecution.effectivePrompt"))
+        assertTrue(enqueue.contains("\"负向词英文译文\" to promptExecution.effectiveNegativePrompt"))
+    }
+
+    @Test
+    fun `UI prepares prompt before worker admission and cancellation remains coroutine owned`() {
+        val source = mainViewModelSource()
+        val enqueue = functionBody(imageGenerationOwnerSource(), "fun submit(") +
+            functionBody(imageGenerationExecutionSource(), "fun runImageGenerationExecution(")
+        val promptPreparation = enqueue.indexOf(
+            "prepareLocalImagePromptExecution("
+        )
+        val cancellationCatch = enqueue.indexOf(
+            "catch (error: CancellationException)",
+            promptPreparation
+        )
+        val nonFatalCatch = enqueue.indexOf("catch (error: Exception)", cancellationCatch)
+        val guardedFailure = enqueue.indexOf(
+            "withLocalImagePromptPreparationFailureIfActive(",
+            nonFatalCatch
+        )
+        val activeOwnership = enqueue.indexOf(
+            "activeJobId = host.activeImageGenerationJobId",
+            guardedFailure
+        )
+        val ignoredTransition = enqueue.indexOf(
+            "if (updatedJobs === state.imageJobs)",
+            activeOwnership
+        )
+        val preparationReturn = enqueue.indexOf("return@launch", ignoredTransition)
+        val promptPrepared = enqueue.indexOf(
+            "currentCoroutineContext().ensureActive()",
+            preparationReturn
+        )
+        val workerBegin = enqueue.indexOf("localImageWorkerClient.begin(model.runtime)")
+        val postBeginCancellationCheck = enqueue.indexOf(
+            "currentCoroutineContext().ensureActive()",
+            workerBegin
+        )
+        val nativeBatch = enqueue.indexOf("executeLocalImageBatchPlan(", workerBegin)
+
+        assertTrue(promptPreparation >= 0)
+        assertFalse(enqueue.substring(0, promptPreparation).contains("localImageWorkerClient.begin("))
+        assertTrue(cancellationCatch > promptPreparation)
+        assertTrue(enqueue.substring(cancellationCatch, nonFatalCatch).contains("throw error"))
+        assertTrue(nonFatalCatch > cancellationCatch)
+        assertTrue(guardedFailure > nonFatalCatch)
+        assertTrue(activeOwnership > guardedFailure)
+        assertTrue(ignoredTransition > activeOwnership)
+        assertTrue(preparationReturn > ignoredTransition)
+        assertTrue(
+            enqueue.substring(nonFatalCatch, preparationReturn)
+                .contains("localImagePromptPreparationFailureMessage(error)")
+        )
+        assertTrue(promptPrepared > promptPreparation)
+        assertTrue(promptPrepared > preparationReturn)
+        assertTrue(workerBegin > promptPrepared)
+        assertTrue(postBeginCancellationCheck > workerBegin)
+        assertTrue(nativeBatch > postBeginCancellationCheck)
+
+        // R3-S25: 取消体逐字迁至 ChatModelCancelAndSwitchOperations.kt；读新落点、拼写随迁
+        // （workerClient.cancel）；顺序合同不变。
+        val cancel = functionBody(
+            sourceFile("ChatModelCancelAndSwitchOperations.kt"),
+            "internal fun cancelImageGenerationForJobFor("
+        )
+        val clientCancel = cancel.indexOf("workerClient.cancel(")
+        val callerOwnedBranch = cancel.indexOf("if (!(localGeneration && nativeCancelRequested))")
+        val coroutineCancel = cancel.indexOf("?.cancel()", callerOwnedBranch)
+        assertTrue(clientCancel >= 0)
+        assertTrue(callerOwnedBranch > clientCancel)
+        assertTrue(coroutineCancel > callerOwnedBranch)
+
+        assertFalse(source.contains("private suspend fun translateLocalImagePrompt("))
+        assertFalse(source.contains("LOCAL_IMAGE_PROMPT_TRANSLATION_TIMEOUT_MS"))
+    }
+
+    @Test
+    fun `retry discards stale prompt execution evidence and rebinds current model`() {
+        val vmSource = mainViewModelSource()
+        assertTrue(vmSource.contains("chatImageWorkflowCoordinator.retryImageGeneration(jobId)"))
+
+        val source = chatImageWorkflowCoordinatorSource()
+        val retry = functionBody(source, "fun retryImageGeneration(")
+        assertTrue(retry.contains("_uiState.value.localImageModels.firstOrNull"))
+        assertTrue(retry.contains("promptExecution = null"))
+        assertTrue(retry.contains("jobSnapshot = retrySnapshot"))
+    }
+
+    @Test
+    fun `local image enqueue and api reject structurally incomplete bundles before worker admission`() {
+        val source = mainViewModelSource()
+        val enqueue = functionBody(imageGenerationOwnerSource(), "fun submit(") +
+            functionBody(imageGenerationExecutionSource(), "fun runImageGenerationExecution(")
+        val preflight = enqueue.indexOf("localImageStructuralReadinessMessage()")
+        val generationLease = enqueue.indexOf("tryAcquireObservedImageGenerationLease(jobId)")
+        val workerBegin = enqueue.indexOf("localImageWorkerClient.begin(")
+        assertTrue(preflight >= 0)
+        assertTrue(generationLease > preflight)
+        assertTrue(workerBegin > preflight)
+
+        val api = functionBody(localApiSource(), "internal suspend fun generateLocalApiImageOperations(")
+        val apiReadiness = api.indexOf("localImageStructuralReadinessMessage()")
+        val apiWorker = api.indexOf("localImageWorkerClient.generate(")
+        assertTrue(apiReadiness >= 0)
+        assertTrue(apiWorker > apiReadiness)
+    }
+
+    @Test
+    fun `worker disconnect and remote failures expose an actionable next step`() {
+        // The failure message mapping moved to LocalImageFailureMessages.kt during P2; the call
+        // site that consumes it now lives in ImageGenerationOwnerExecution.kt, at the end of this test. Two sources,
+        // because the four assertions above the last one are about the mapping and the last one
+        // is about its caller. No assertion changed -- only the file each one reads.
+        val source = mainViewModelSource()
+        val failureMessages = sourceFile("LocalImageFailureMessages.kt")
+        assertTrue(failureMessages.contains("internal fun localImageGenerationFailureMessage(error: Throwable)"))
+        assertTrue(failureMessages.contains("可用内存不足"))
+        assertTrue(failureMessages.contains("校验模型包后重试"))
+        assertTrue(failureMessages.contains("请等待 1 秒后重试"))
+        assertTrue(imageGenerationOwnerSource().contains("val nativeMessage = localImageGenerationFailureMessage(error)"))
+    }
+
+    @Test
+    fun `preparation-only worker cancellation cannot claim a native request`() {
+        val client = localImageWorkerClientSource()
+        val begin = functionBody(client, "fun begin(runtime: LocalImageRuntime)")
+        val cancel = functionBody(client, "private fun cancelInternal(")
+        val noRequest = cancel.indexOf("if (request == null) {")
+        val remotePreparationCancel = cancel.indexOf(
+            "endpoint.service.cancel(LocalImageWorkerProtocol.cancelRequest(null))",
+            noRequest
+        )
+        val callerOwned = cancel.indexOf("return false", remotePreparationCancel)
+        val registeredRequest = cancel.indexOf("return when (snapshot.third)")
+
+        assertTrue(noRequest >= 0)
+        assertTrue(remotePreparationCancel > noRequest)
+        assertTrue(callerOwned > remotePreparationCancel)
+        assertTrue(registeredRequest > callerOwned)
+        assertFalse(cancel.substring(noRequest, registeredRequest).contains("return supportsNativeCancel"))
+        assertTrue(begin.contains("if (next.cancelRequested || !isCurrentPreparation(next))"))
+        assertTrue(begin.contains("releaseBindingAfterPreparationFailure(next, cancelled)"))
+    }
+
+    /** v4-①：位置无关——按标记定位承载文件（VM 类声明处）。 */
+    private fun mainViewModelSource(): String =
+        SourceTextFixtures.sourceOf("class MainViewModel @JvmOverloads internal constructor(")
+
+    private fun chatImageWorkflowCoordinatorSource(): String = sourceFile("ChatImageWorkflowCoordinator.kt")
+
+    /** R3/C2 + T2B20/R7-C9: the admission shell keeps `fun submit`; the launch body moved verbatim
+     *  to ImageGenerationOwnerExecution.kt. Read both where they now live. */
+    private fun imageGenerationOwnerSource(): String =
+        sourceFile("ImageGenerationOwner.kt") + sourceFile("ImageGenerationOwnerExecution.kt")
+
+    private fun imageGenerationExecutionSource(): String = sourceFile("ImageGenerationOwnerExecution.kt")
+
+    /**
+     * The prompt-preparation body now lives in its own file. The assertions below are unchanged --
+     * only the file they read moved -- so this is the same contract, checked at its new home.
+     */
+    private fun prepareSource(): String = sourceFile("LocalImagePromptPreparation.kt")
+
+    /**
+     * The Local API image adapter moved into the `presentation` sub-package, which the filename-based
+     * `sourceFile(fileName)` above cannot reach: two of its three candidates hard-code
+     * `com/muyuchat/mca/`. Use the repository-relative form instead.
+     */
+    private fun localApiSource(): String = sourceFile(
+        "app/src/main/java/com/muyuchat/mca/presentation/LocalApiImageGenerationOperations.kt"
+    )
+
+    /** The publish half of the local image path, which now lives in its own file. */
+    private fun localAssetSource(): String = sourceFile(
+        "app/src/main/java/com/muyuchat/mca/CreateLocalGeneratedImageAssetOperations.kt"
+    )
+
+    private fun localImageWorkerClientSource(): String = sourceFile("LocalImageWorkerClient.kt")
+
+    private fun sourceFile(fileName: String): String {
+        var root = File(requireNotNull(System.getProperty("user.dir"))).absoluteFile
+        repeat(8) {
+            listOf(
+                File(root, fileName),
+                File(root, "src/main/java/com/muyuchat/mca/$fileName"),
+                File(root, "app/src/main/java/com/muyuchat/mca/$fileName")
+            ).firstOrNull(File::isFile)?.let { return it.readText(Charsets.UTF_8) }
+            root = root.parentFile ?: return@repeat
+        }
+        error("Unable to locate $fileName")
+    }
+
+    private fun functionBody(source: String, signature: String): String {
+        val start = source.indexOf(signature)
+        require(start >= 0) { "Missing source signature: $signature" }
+        val openingParenthesis = source.indexOf('(', start)
+        require(openingParenthesis >= 0) { "Missing function parameter list: $signature" }
+        var parenthesisDepth = 0
+        var closingParenthesis = -1
+        for (index in openingParenthesis until source.length) {
+            when (source[index]) {
+                '(' -> parenthesisDepth += 1
+                ')' -> {
+                    parenthesisDepth -= 1
+                    if (parenthesisDepth == 0) {
+                        closingParenthesis = index
+                        break
+                    }
+                }
+            }
+        }
+        require(closingParenthesis >= 0) { "Unterminated function parameter list: $signature" }
+        val openingBrace = source.indexOf('{', closingParenthesis)
+        require(openingBrace >= 0) { "Missing function body: $signature" }
+        var depth = 0
+        for (index in openingBrace until source.length) {
+            when (source[index]) {
+                '{' -> depth += 1
+                '}' -> {
+                    depth -= 1
+                    if (depth == 0) return source.substring(start, index + 1)
+                }
+            }
+        }
+        error("Unterminated function body: $signature")
+    }
+}

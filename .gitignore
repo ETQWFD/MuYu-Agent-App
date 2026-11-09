@@ -1,0 +1,61 @@
+.gradle/
+.gradle-runtime/
+.kotlin/
+.cache/
+.local-history-backups/
+.worktrees/
+build/
+**/build/
+**/.cxx/
+local.properties
+.env
+.env.*
+.signing/
+.release/
+signing.properties
+*.keystore
+*.jks
+*.p12
+*.pem
+*.key
+
+# Android Studio
+.idea/
+*.iml
+
+# Local SDK/download artifacts
+android-sdk/
+android-sdk-cmdline*.zip
+android-sdk-cmdline-extract/
+
+# Rehydrated from the pinned manifest + patch in vendor/mnn.
+/third_party/MNN/
+
+# Generated APKs and binaries are reproducible from Gradle
+*.apk
+*.aab
+
+# Logs
+*.log
+
+# Local verification scratch files
+.tmp/
+.tmp-*
+.external/
+tmp_*/
+*.obj
+*.exe
+
+# Official DSH payload staged from the pinned reference APK (scripts/dsh/stage.ps1).
+# These are third-party binaries/kernel files, never committed; the signed manifest and the
+# source URL/SHA live in docs/proposals/agent-dsh-embedded-v1/BASELINE.md.
+/third_party/dsh/
+/core/dsh-runtime/src/main/assets/dsh/
+/core/dsh-runtime/src/main/jniLibs/
+
+# Prebuilt external Wan engine staged by
+# docs/proposals/mca-native-video-workflow-v1/build-engine.sh. The shipped
+# libstable-diffusion.so is 155 MB and already over GitHub's per-file limit; the
+# script prints size/SHA-256 for every artifact and the pinned baseline is in
+# docs/proposals/mca-native-video-workflow-v1/BASELINE_MANIFEST.md.
+/core/sd-native/src/main/jniLibs/
